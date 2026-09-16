@@ -1,0 +1,34 @@
+{
+  "subscribers": [
+    {
+      "subscriberRef": "dedi-demo.local",
+      "catalogs": [
+        {
+          "catalogId": "dedi-demo.local/sample-catalog",
+          "version": "1",
+          "catalog": {
+            "id": "dedi-demo.local/sample-catalog",
+            "descriptor": { "name": "Dedi Demo Catalog" },
+            "provider": {
+              "id": "dedi-demo-provider",
+              "descriptor": { "name": "Dedi Demo Provider" }
+            },
+            "resources": [
+              {
+                "id": "res-demo-1",
+                "descriptor": { "name": "Demo Resource One" }
+              }
+            ],
+            "offers": [
+              {
+                "id": "offer-demo-1",
+                "descriptor": { "name": "Demo Offer One" },
+                "resourceIds": ["res-demo-1"]
+              }
+            ]
+          }
+        }
+      ]
+    }
+  ]
+}

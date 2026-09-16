@@ -8,6 +8,7 @@ import (
 	"fmt"
 	"io"
 	"net/http"
+	"strconv"
 
 	"github.com/remiges-tech/logharbour/logharbour"
 	"github.com/remiges-tushar/discovery-service/internal/beckn"
@@ -107,9 +108,11 @@ func (c *Crawler) CrawlSubscriber(ctx context.Context, subscriberRef string) err
 		return fmt.Errorf("verify subscriber record %q: %w", subscriberRef, err)
 	}
 
-	var indexed int
+	var indexed, attempted int
+	anyIndexFetchedOK := false
+	seen := make(map[string]bool)
 	for _, indexURL := range record.CatalogIndexURLs {
-		n, err := c.crawlIndex(ctx, indexURL, subscriberKey)
+		n, a, err := c.crawlIndex(ctx, indexURL, subscriberRef, subscriberKey, seen)
 		if err != nil {
 			c.logger.Warn().LogActivity("catalog index crawl failed, skipping this index", map[string]any{
 				"subscriberRef": subscriberRef,
@@ -118,29 +121,49 @@ func (c *Crawler) CrawlSubscriber(ctx context.Context, subscriberRef string) err
 			})
 			continue
 		}
+		anyIndexFetchedOK = true
 		indexed += n
+		attempted += a
 	}
-	if indexed == 0 && len(record.CatalogIndexURLs) > 0 {
-		return fmt.Errorf("no catalog index entries indexed from any of %d index url(s)", len(record.CatalogIndexURLs))
+	if indexed == 0 {
+		if !anyIndexFetchedOK {
+			return fmt.Errorf("failed to fetch any catalog index from %d url(s)", len(record.CatalogIndexURLs))
+		}
+		if attempted > 0 {
+			return fmt.Errorf("no catalog index entries indexed out of %d attempted", attempted)
+		}
+		// At least one index fetched and parsed fine but declared zero
+		// in-scope entries — a legitimately empty index, not a failure.
 	}
+
+	// This subscriber's crawl succeeded overall — a catalogId previously
+	// indexed for it but absent from every index just fetched (without a
+	// signed retiredAt tombstone) stops being served until reconfirmed
+	// (CON-TBD-27/CON-TBD-35), without erasing its cursor state.
+	c.cursor.markUnseen(subscriberRef, seen)
 	return nil
 }
 
-func (c *Crawler) crawlIndex(ctx context.Context, indexURL string, subscriberKey ed25519.PublicKey) (int, error) {
+// crawlIndex fetches and applies one catalog index. It returns indexed (how
+// many in-scope entries were successfully applied) and attempted (how many
+// in-scope entries were tried at all, whether or not they succeeded) — the
+// two are compared by the caller to distinguish "index legitimately declared
+// nothing in scope" from "entries existed but all failed verification".
+func (c *Crawler) crawlIndex(ctx context.Context, indexURL, subscriberRef string, subscriberKey ed25519.PublicKey, seen map[string]bool) (indexed, attempted int, err error) {
 	raw, err := c.fetchBytes(ctx, indexURL)
 	if err != nil {
-		return 0, fmt.Errorf("fetch catalog index: %w", err)
+		return 0, 0, fmt.Errorf("fetch catalog index: %w", err)
 	}
 	var index CatalogIndex
 	if err := json.Unmarshal(raw, &index); err != nil {
-		return 0, fmt.Errorf("decode catalog index: %w", err)
+		return 0, 0, fmt.Errorf("decode catalog index: %w", err)
 	}
 
 	ordered := orderMastersFirst(index.Entries)
 
-	indexed := 0
 	for _, entry := range ordered {
 		if err := verifyIndexEntrySignature(entry, subscriberKey); err != nil {
+			attempted++
 			c.logger.Warn().LogActivity("catalog index entry signature invalid, discarding", map[string]any{
 				"catalogId": entry.CatalogID,
 				"error":     err.Error(),
@@ -148,9 +171,13 @@ func (c *Crawler) crawlIndex(ctx context.Context, indexURL string, subscriberKey
 			continue
 		}
 		if !c.inScope(entry) {
+			// Deliberately excluded by this DS's own scope filters — not an
+			// attempt that failed, so it doesn't count toward attempted.
 			continue
 		}
-		if err := c.applyEntry(ctx, entry, subscriberKey); err != nil {
+		attempted++
+		seen[entry.CatalogID] = true
+		if err := c.applyEntry(ctx, entry, subscriberRef, subscriberKey); err != nil {
 			c.logger.Warn().LogActivity("catalog entry discarded", map[string]any{
 				"catalogId": entry.CatalogID,
 				"error":     err.Error(),
@@ -159,7 +186,7 @@ func (c *Crawler) crawlIndex(ctx context.Context, indexURL string, subscriberKey
 		}
 		indexed++
 	}
-	return indexed, nil
+	return indexed, attempted, nil
 }
 
 // orderMastersFirst returns entries with CatalogType==MASTER before all
@@ -207,7 +234,7 @@ func intersects(want, have []string) bool {
 // retiredAt permanently, skipping a fetch when entryVersion is unchanged,
 // and otherwise fetching + verifying + applying the baseline or change
 // file(s) that bring the catalog up to entry.EntryVersion (§10.1/§10.5).
-func (c *Crawler) applyEntry(ctx context.Context, entry IndexEntry, subscriberKey ed25519.PublicKey) error {
+func (c *Crawler) applyEntry(ctx context.Context, entry IndexEntry, subscriberRef string, subscriberKey ed25519.PublicKey) error {
 	prev, known := c.cursor.get(entry.CatalogID)
 	if prev.retired {
 		// Permanent tombstone: never resurrected by a later crawl that
@@ -217,17 +244,31 @@ func (c *Crawler) applyEntry(ctx context.Context, entry IndexEntry, subscriberKe
 
 	if entry.RetiredAt != nil {
 		c.cursor.put(entry.CatalogID, cursorEntry{
-			entryVersion: entry.EntryVersion,
-			isActive:     false,
-			retired:      true,
+			entryVersion:  entry.EntryVersion,
+			isActive:      false,
+			retired:       true,
+			subscriberRef: subscriberRef,
 		})
 		return nil
 	}
 
+	if known && versionRegressed(prev.entryVersion, entry.EntryVersion) {
+		// CON-TBD-03/04/11: versions MUST be monotonic; an entryVersion
+		// that regresses relative to our cursor is discarded rather than
+		// applied (best-effort — only enforced when both versions parse as
+		// integers, since this crawler treats entryVersion as an opaque
+		// string more generally).
+		return fmt.Errorf("entryVersion regressed: cursor at %q, index declares %q", prev.entryVersion, entry.EntryVersion)
+	}
+
 	if known && prev.entryVersion == entry.EntryVersion {
 		// Unchanged: keep prior content, just refresh isActive in case a
-		// pause/unpause happened without a version bump.
+		// pause/unpause happened without a version bump, and reconfirm it
+		// (clears any unconfirmed flag from a prior crawl where this
+		// catalogId was absent — see cursorState.markUnseen).
 		prev.isActive = entry.IsActive
+		prev.subscriberRef = subscriberRef
+		prev.unconfirmed = false
 		c.cursor.put(entry.CatalogID, prev)
 		return nil
 	}
@@ -238,11 +279,26 @@ func (c *Crawler) applyEntry(ctx context.Context, entry IndexEntry, subscriberKe
 	}
 
 	c.cursor.put(entry.CatalogID, cursorEntry{
-		entryVersion: newVersion,
-		isActive:     entry.IsActive,
-		catalog:      catalog,
+		entryVersion:  newVersion,
+		isActive:      entry.IsActive,
+		catalog:       catalog,
+		subscriberRef: subscriberRef,
 	})
 	return nil
+}
+
+// versionRegressed reports whether newVersion is numerically smaller than
+// prevVersion. Both must parse as base-10 integers for the check to apply;
+// otherwise (e.g. this crawler's own opaque version strings like "v1"/"v2"
+// used before a real Registry integration exists) it reports false — no
+// false positives on non-numeric version schemes.
+func versionRegressed(prevVersion, newVersion string) bool {
+	prev, err1 := strconv.ParseInt(prevVersion, 10, 64)
+	next, err2 := strconv.ParseInt(newVersion, 10, 64)
+	if err1 != nil || err2 != nil {
+		return false
+	}
+	return next < prev
 }
 
 // resolveCatalog fetches whatever's needed to bring entry.CatalogID's

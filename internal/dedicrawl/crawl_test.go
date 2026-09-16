@@ -212,3 +212,99 @@ func TestCrawlSubscriber_RetiredCatalogIsRemovedAndNeverResurrected(t *testing.T
 		t.Fatalf("retired catalog was resurrected: %+v", got)
 	}
 }
+
+func TestCrawlSubscriber_RejectsRegressedEntryVersion(t *testing.T) {
+	registryPriv, _ := mustKeyPair(t)
+	subscriberPriv, subscriberPub := mustKeyPair(t)
+
+	file, rawFile := signedCatalogFile(t, subscriberPriv, CatalogFile{CatalogID: "cat-7", Version: "2", Catalog: sampleCatalog("cat-7")})
+	srv := fileServer(t, map[string][]byte{"/f.json": rawFile})
+	// cursorEntry.entryVersion is populated from the baseline's own Version
+	// on a fresh fetch (see resolveCatalog/fetchBaseline) — keep it aligned
+	// with entryV2.EntryVersion below so the regression comparison exercises
+	// the intended values.
+	baseline := FileRef{Version: file.Version, URL: srv.URL + "/f.json", Size: int64(len(rawFile)), Digest: Digest(rawFile)}
+
+	entryV2 := signedIndexEntry(t, subscriberPriv, IndexEntry{
+		CatalogID: "cat-7", EntryVersion: "2", CatalogType: CatalogTypeRegular, IsActive: true, Baseline: baseline,
+	})
+	rawIndexV2, _ := json.Marshal(CatalogIndex{Entries: []IndexEntry{entryV2}})
+	entryV1Regressed := signedIndexEntry(t, subscriberPriv, IndexEntry{
+		CatalogID: "cat-7", EntryVersion: "1", CatalogType: CatalogTypeRegular, IsActive: true, Baseline: baseline,
+	})
+	rawIndexV1, _ := json.Marshal(CatalogIndex{Entries: []IndexEntry{entryV1Regressed}})
+
+	var currentIndex []byte = rawIndexV2
+	indexSrv := fileServerDynamic(t, "/idx.json", func() []byte { return currentIndex })
+	record := digestedSubscriberRecord(t, SubscriberRecord{SubscriberID: "pn-7", CatalogIndexURLs: []string{indexSrv.URL + "/idx.json"}})
+	registry := NewStubRegistry(registryPriv)
+	registry.Seed("pn-7", record, subscriberPub)
+	crawler := NewCrawler(registry, "", srv.Client(), testLogger(), nil, nil, 0.5)
+
+	if err := crawler.CrawlSubscriber(t.Context(), "pn-7"); err != nil {
+		t.Fatalf("first crawl (entryVersion 2): %v", err)
+	}
+
+	currentIndex = rawIndexV1
+	if err := crawler.CrawlSubscriber(t.Context(), "pn-7"); err == nil {
+		t.Fatal("expected crawl to report failure when the only entry's entryVersion regressed")
+	}
+
+	before, ok := crawler.cursor.get("cat-7")
+	if !ok || before.entryVersion != "2" {
+		t.Fatalf("cursor should still be at entryVersion 2 after a rejected regression, got %+v (ok=%v)", before, ok)
+	}
+}
+
+func TestCrawlSubscriber_AbsentCatalogStopsBeingServedButIsNotErased(t *testing.T) {
+	registryPriv, _ := mustKeyPair(t)
+	subscriberPriv, subscriberPub := mustKeyPair(t)
+
+	file, rawFile := signedCatalogFile(t, subscriberPriv, CatalogFile{CatalogID: "cat-8", Version: "v1", Catalog: sampleCatalog("cat-8")})
+	srv := fileServer(t, map[string][]byte{"/f.json": rawFile})
+	baseline := FileRef{Version: file.Version, URL: srv.URL + "/f.json", Size: int64(len(rawFile)), Digest: Digest(rawFile)}
+
+	entry := signedIndexEntry(t, subscriberPriv, IndexEntry{
+		CatalogID: "cat-8", EntryVersion: "v1", CatalogType: CatalogTypeRegular, IsActive: true, Baseline: baseline,
+	})
+	rawIndexWithEntry, _ := json.Marshal(CatalogIndex{Entries: []IndexEntry{entry}})
+	rawIndexEmpty, _ := json.Marshal(CatalogIndex{Entries: []IndexEntry{}})
+
+	var currentIndex []byte = rawIndexWithEntry
+	indexSrv := fileServerDynamic(t, "/idx.json", func() []byte { return currentIndex })
+	record := digestedSubscriberRecord(t, SubscriberRecord{SubscriberID: "pn-8", CatalogIndexURLs: []string{indexSrv.URL + "/idx.json"}})
+	registry := NewStubRegistry(registryPriv)
+	registry.Seed("pn-8", record, subscriberPub)
+	crawler := NewCrawler(registry, "", srv.Client(), testLogger(), nil, nil, 0.5)
+
+	if err := crawler.CrawlSubscriber(t.Context(), "pn-8"); err != nil {
+		t.Fatalf("first crawl: %v", err)
+	}
+	if got := crawler.cursor.snapshot(); len(got) != 1 {
+		t.Fatalf("expected cat-8 served after first crawl, got %+v", got)
+	}
+
+	// The index no longer lists cat-8 at all — no retiredAt, no successor
+	// entry. Per CON-TBD-27/35 this must stop it being served, but must NOT
+	// erase its cursor state (a real retirement/rollback recovers instead
+	// of starting over).
+	currentIndex = rawIndexEmpty
+	if err := crawler.CrawlSubscriber(t.Context(), "pn-8"); err != nil {
+		t.Fatalf("second crawl (empty index): %v", err)
+	}
+	if got := crawler.cursor.snapshot(); len(got) != 0 {
+		t.Fatalf("expected cat-8 to stop being served once absent from the index, got %+v", got)
+	}
+	if entry, ok := crawler.cursor.get("cat-8"); !ok || entry.retired {
+		t.Fatalf("cat-8's cursor state should be kept (unconfirmed, not retired/erased), got %+v (ok=%v)", entry, ok)
+	}
+
+	// Reappearing in a later index reconfirms it.
+	currentIndex = rawIndexWithEntry
+	if err := crawler.CrawlSubscriber(t.Context(), "pn-8"); err != nil {
+		t.Fatalf("third crawl: %v", err)
+	}
+	if got := crawler.cursor.snapshot(); len(got) != 1 {
+		t.Fatalf("expected cat-8 reconfirmed and served again, got %+v", got)
+	}
+}
