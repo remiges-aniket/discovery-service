@@ -1,0 +1,312 @@
+{
+  "catalogs": [
+    {
+      "id": "CAT-COFFEE-CATPUB-006",
+      "descriptor": {
+        "name": "CatPub Coffee Catalog",
+        "shortDesc": "CatPub coffee "
+      },
+      "provider": {
+        "id": "CATPUB Chikamagalur Branch",
+        "descriptor": {
+          "name": "CatPub Chikamagalur Pvt Ltd"
+        },
+        "availableAt": [
+          {
+            "geo": {
+              "type": "Point",
+              "coordinates": [77.6401, 12.9116]
+            },
+            "address": {
+              "streetAddress": "27th Main Rd, Sector 2, HSR Layout",
+              "addressLocality": "Bengaluru",
+              "addressRegion": "Karnataka",
+              "postalCode": "560102",
+              "addressCountry": "IN"
+            }
+          }
+        ]
+      },
+      "resources": [
+        {
+          "id": "RES-GROCERY-CHICKAMAGALUR-COFFEE-1000GRAMS-006",
+          "descriptor": {
+            "name": "Chickamagalur Arabica Coffee",
+            "shortDesc": "Rich and aromatic filter coffee powder, 1000g",
+            "longDesc": "Pure Arabica coffee without chicory.",
+            "mediaFile": [
+              {
+                "uri": "https://www.jiomart.com/images/product/original/599173064/599173064.jpg",
+                "mimeType": "image/jpeg",
+                "label": "Product image"
+              }
+            ]
+          },
+          "resourceAttributes": {
+            "@context": "https://schema.beckn.io/RetailResource/v2.1/context.jsonld",
+            "@type": "RetailResource",
+            "nutrition": [
+              { "nutrient": "Energy", "value": { "@type": "schema:QuantitativeValue", "value": 287, "unitText": "KCAL" } },
+              { "nutrient": "Protein", "value": { "@type": "schema:QuantitativeValue", "value": 13.5, "unitText": "G" } },
+              { "nutrient": "Caffeine", "value": { "@type": "schema:QuantitativeValue", "value": 56, "unitText": "MG" } }
+            ],
+            "packagedGoodsDeclaration": {
+              "manufacturerOrPacker": {
+                "type": "MANUFACTURER",
+                "name": "CatPub Chikamagalur Branch",
+                "id": "CATPUB-KA-1001",
+                "address": "Chickamagalur, Karnataka, 577101, IN"
+              },
+              "commonOrGenericName": "Pure Arabica Coffee",
+              "netQuantity": { "unitQuantity": 1000, "unitText": "Grams", "unitCode": "G" },
+              "manufacturePackingImportDate": { "month": 7, "year": 2026 }
+            },
+            "identity": {
+              "brand": "CatPub",
+              "originCountry": "IN"
+            },
+            "foodRegulatoryDeclaration": {
+              "registrations": [
+                { "scheme": "FSSAI", "id": "10013022002253", "role": "MANUFACTURER" }
+              ],
+              "additives": [
+                { "type": "FREE_FROM", "value": "Artificial colours" },
+                { "type": "FREE_FROM", "value": "Preservatives" }
+              ]
+            },
+            "physical": {
+              "weight": { "unitQuantity": 1000, "unitText": "Grams", "unitCode": "G" }
+            },
+            "food": {
+              "classification": ["VEG"]
+            }
+          }
+        }
+      ],
+      "offers": [
+        {
+          "id": "OFFER-CHK-ARA-500G-006",
+          "descriptor": {
+            "name": "Chickamagalur Arabica Coffee 1000g",
+            "shortDesc": "Chickamagalur Arabica 1000g"
+          },
+          "resourceIds": ["RES-GROCERY-CHICKAMAGALUR-COFFEE-1000GRAMS-006"],
+          "provider": {
+            "id": "CATPUB Chikamagalur Branch",
+            "descriptor": {
+              "name": "CatPub Chickamagalur Pvt Ltd"
+            },
+            "availableAt": [
+              {
+                "geo": {
+                  "type": "Point",
+                  "coordinates": [77.6245, 12.9352]
+                },
+                "address": {
+                  "streetAddress": "80 Feet Rd, 4th Block, Koramangala",
+                  "addressLocality": "Bengaluru",
+                  "addressRegion": "Karnataka",
+                  "postalCode": "560034",
+                  "addressCountry": "IN"
+                }
+              }
+            ]
+          },
+          "validity": {
+            "startDate": "2026-04-01T00:00:00Z",
+            "endDate": "2026-06-30T23:59:59Z"
+          },
+          "considerations": [
+            {
+              "id": "CONSIDERATION-CKM-ARA-1000",
+              "status": { "name": "ACTIVE" },
+              "considerationAttributes": {
+                "@context": "https://schema.beckn.io/RetailConsideration/v2.1/context.jsonld",
+                "@type": "RetailConsideration",
+                "currency": "INR",
+                "breakup": [
+                  { "title": "Chickamagalur Arabica Coffee 1000g MRP", "amount": 900, "type": "BASE_PRICE" }
+                ],
+                "totalAmount": 900
+              }
+            }
+          ],
+          "offerAttributes": {
+            "@context": "https://schema.beckn.io/RetailOffer/v2.1/context.jsonld",
+            "@type": "RetailOffer",
+            "policies": {
+              "returns": { "allowed": true, "window": "P7D", "method": "SELLER_PICKUP" }
+            },
+            "paymentConstraints": {
+              "codAvailable": true
+            },
+            "serviceability": {
+              "distanceConstraint": { "maxDistance": 10, "unit": "KM" },
+              "timing": [
+                {
+                  "daysOfWeek": ["MON", "TUE", "WED", "THU", "FRI", "SAT"],
+                  "timeRange": { "start": "08:00", "end": "21:00" }
+                }
+              ]
+            }
+          }
+        }
+      ]
+    },
+    {
+      "id": "CAT-COFFEE-CATPUB-007",
+      "descriptor": {
+        "name": "CatPub Coffee Catalog",
+        "shortDesc": "CatPub coffee "
+      },
+      "provider": {
+        "id": "CATPUB Chikamagalur Branch",
+        "descriptor": {
+          "name": "CatPub Chikamagalur Pvt Ltd"
+        },
+        "availableAt": [
+          {
+            "geo": {
+              "type": "Point",
+              "coordinates": [77.6401, 12.9116]
+            },
+            "address": {
+              "streetAddress": "27th Main Rd, Sector 2, HSR Layout",
+              "addressLocality": "Bengaluru",
+              "addressRegion": "Karnataka",
+              "postalCode": "560102",
+              "addressCountry": "IN"
+            }
+          }
+        ]
+      },
+      "bppId": "obs-seller.loca.lt",
+      "bppUri": "https://obs-seller.loca.lt/bpp/receiver",
+      "resources": [
+        {
+          "id": "RES-GROCERY-CHICKAMAGALUR-COFFEE-1000GRAMS-007",
+          "descriptor": {
+            "name": "Chickamagalur Arabica Coffee",
+            "shortDesc": "Rich and aromatic filter coffee powder, 1000g",
+            "longDesc": "Pure Arabica coffee without chicory.",
+            "mediaFile": [
+              {
+                "uri": "https://www.jiomart.com/images/product/original/599173064/599173064.jpg",
+                "mimeType": "image/jpeg",
+                "label": "Product image"
+              }
+            ]
+          },
+          "resourceAttributes": {
+            "@context": "https://schema.beckn.io/RetailResource/v2.1/context.jsonld",
+            "@type": "RetailResource",
+            "nutrition": [
+              { "nutrient": "Energy", "value": { "@type": "schema:QuantitativeValue", "value": 287, "unitText": "KCAL" } },
+              { "nutrient": "Protein", "value": { "@type": "schema:QuantitativeValue", "value": 13.5, "unitText": "G" } },
+              { "nutrient": "Caffeine", "value": { "@type": "schema:QuantitativeValue", "value": 56, "unitText": "MG" } }
+            ],
+            "packagedGoodsDeclaration": {
+              "manufacturerOrPacker": {
+                "type": "MANUFACTURER",
+                "name": "CatPub Chikamagalur Branch",
+                "id": "CATPUB-KA-1001",
+                "address": "Chickamagalur, Karnataka, 577101, IN"
+              },
+              "commonOrGenericName": "Pure Arabica Coffee",
+              "netQuantity": { "unitQuantity": 1000, "unitText": "Grams", "unitCode": "G" },
+              "manufacturePackingImportDate": { "month": 7, "year": 2026 }
+            },
+            "identity": {
+              "brand": "CatPub",
+              "originCountry": "IN"
+            },
+            "foodRegulatoryDeclaration": {
+              "registrations": [
+                { "scheme": "FSSAI", "id": "10013022002253", "role": "MANUFACTURER" }
+              ],
+              "additives": [
+                { "type": "FREE_FROM", "value": "Artificial colours" },
+                { "type": "FREE_FROM", "value": "Preservatives" }
+              ]
+            },
+            "physical": {
+              "weight": { "unitQuantity": 1000, "unitText": "Grams", "unitCode": "G" }
+            },
+            "food": {
+              "classification": ["VEG"]
+            }
+          }
+        }
+      ],
+      "offers": [
+        {
+          "id": "OFFER-CHK-ARA-500G-007",
+          "descriptor": {
+            "name": "Chickamagalur Arabica Coffee 1000g",
+            "shortDesc": "Chickamagalur Arabica 1000g"
+          },
+          "resourceIds": ["RES-GROCERY-CHICKAMAGALUR-COFFEE-1000GRAMS-007"],
+          "provider": {
+            "id": "CATPUB Chikamagalur Branch",
+            "descriptor": {
+              "name": "CatPub Chickamagalur Pvt Ltd"
+            },
+            "availableAt": [
+              {
+                "geo": {
+                  "type": "Point",
+                  "coordinates": [77.6245, 12.9352]
+                },
+                "address": {
+                  "streetAddress": "80 Feet Rd, 4th Block, Koramangala",
+                  "addressLocality": "Bengaluru",
+                  "addressRegion": "Karnataka",
+                  "postalCode": "560034",
+                  "addressCountry": "IN"
+                }
+              }
+            ]
+          },
+          "validity": {
+            "startDate": "2026-04-01T00:00:00Z",
+            "endDate": "2026-06-30T23:59:59Z"
+          },
+          "considerations": [
+            {
+              "id": "CONSIDERATION-CKM-ARA-1000",
+              "status": { "name": "ACTIVE" },
+              "considerationAttributes": {
+                "@context": "https://schema.beckn.io/RetailConsideration/v2.1/context.jsonld",
+                "@type": "RetailConsideration",
+                "currency": "INR",
+                "breakup": [
+                  { "title": "Chickamagalur Arabica Coffee 1000g MRP", "amount": 900, "type": "BASE_PRICE" }
+                ],
+                "totalAmount": 900
+              }
+            }
+          ],
+          "offerAttributes": {
+            "@context": "https://schema.beckn.io/RetailOffer/v2.1/context.jsonld",
+            "@type": "RetailOffer",
+            "policies": {
+              "returns": { "allowed": true, "window": "P7D", "method": "SELLER_PICKUP" }
+            },
+            "paymentConstraints": {
+              "codAvailable": true
+            },
+            "serviceability": {
+              "distanceConstraint": { "maxDistance": 10, "unit": "KM" },
+              "timing": [
+                {
+                  "daysOfWeek": ["MON", "TUE", "WED", "THU", "FRI", "SAT"],
+                  "timeRange": { "start": "08:00", "end": "21:00" }
+                }
+              ]
+            }
+          }
+        }
+      ]
+    }
+  ]
+}
