@@ -644,6 +644,303 @@ after a wrong assumption was corrected:
      existing M1/D16 tests pass unmodified (89 tests total across 12
      packages, `-race` clean).
 
+**D18 — `internal/dedicrawl` wired in as an opt-in alternative to
+`catalogsource`, behind `CATALOG_SOURCE_MODE` (2026-09-16).** A separate,
+already-built package implementing `protocol-specifications-v2`'s
+`Catalog_Publishing_and_Discovery.md` §10 decentralized model existed in the
+repo (Registry manifest → subscriber record → catalog index → signed
+baseline/change files, Ed25519 + BLAKE2b-512 + JCS verified at every hop)
+but was never reachable from `cmd/discovery/main.go` — a from-scratch
+implementation of the ingestion side of the spec, distinct from and not a
+port of `catalogsource` (D17) or beckn-discovr. Read directly against the
+raw `beckn.yaml`/RFC text (not just this repo's own docs) to confirm two
+things: `/discover`/`/on_discover` themselves already match `beckn.yaml`
+field-for-field, and `catalogsource` is genuinely live in production
+(verified: the running container was actively polling `bpp:8080` and serving
+4 real catalogs) — so nothing about this work could risk that path.
+
+- **Config switch, not a replacement.** New `CATALOG_SOURCE_MODE`
+  (`"dashboard"` default / `"dedi"`) in `internal/config/config.go`;
+  `cmd/discovery/main.go`'s `buildCatalogStore` now branches into
+  `buildDashboardCatalogStore` (byte-for-byte the old function) or
+  `buildDediCatalogStore`. `catalogsource` itself is untouched — it remains
+  the production default.
+- **No real DeDi Registry exists yet to crawl against.** `dedi` mode's only
+  `Registry` implementation is still `StubRegistry`. To make it demoable end
+  to end anyway, `internal/dedicrawl/fixture.go` (new) reads a checked-in
+  JSON `Fixture` (`internal/dedicrawl/testdata/sample-fixture.json`),
+  self-signs a `CatalogFile`/`CatalogIndex`/`SubscriberRecord` per declared
+  subscriber with a keypair generated fresh every process start, and serves
+  them over a loopback-only `http.Server` so `Crawler.fetchBytes`'s plain
+  HTTP GETs have something real to hit. New config: `DEDI_FIXTURE_PATH`
+  (required for `dedi` mode to serve anything — falls back to
+  `service.EmbeddedCatalogStore{}` with a logged warning if empty/unreadable,
+  never crashes startup), `DEDI_SUBSCRIBER_REFS` (optional subset filter),
+  `DEDI_NETWORK_IDS`/`DEDI_SCHEMA_TYPES` (index-scoping), `DEDI_CUTOVER_FRACTION`.
+  **This fixture harness is explicitly a local dev/demo tool, not a
+  production integration** — same posture as the ephemeral outbound signing
+  key in `buildSigner` when `SIGNING_PRIVATE_KEY_BASE64` is unset. All six new
+  vars were also added to `docker-compose.yml`'s `environment:` block (it
+  only forwards vars explicitly listed there — every existing var already
+  had an entry, and the new ones needed the same or they'd be invisible to
+  the container despite being in `.env`/`.env.example`).
+- **Two spec-fidelity gaps closed in `internal/dedicrawl` itself** (found by
+  reading `Catalog_Publishing_and_Discovery.md` directly, not just inferring
+  from code):
+  1. **Version-regression rejection** (CON-TBD-03/04/11): `applyEntry` had no
+     monotonicity check at all. Added `versionRegressed` — best-effort,
+     applies only when both the cursor's and the new entry's `entryVersion`
+     parse as base-10 integers (this crawler's own tests/fixtures still use
+     opaque strings like `"v1"`/`"v2"`, which intentionally skip the check
+     rather than false-positive).
+  2. **Absence vs. retirement** (CON-TBD-27/35): a catalogId missing from a
+     successfully-fetched, validly-signed index (no `retiredAt`) previously
+     stayed served forever on stale content. `cursorState` gained an
+     `unconfirmed` flag and `markUnseen` (called once per subscriber's full
+     crawl, across all its catalog indexes): a dropped-without-tombstone
+     catalog stops being served (excluded from `snapshot()`) but its cursor
+     state is kept, not erased, so a later crawl that reconfirms it resumes
+     serving it. `CrawlSubscriber`'s "no entries indexed" failure check was
+     refined alongside this (`crawlIndex` now separately reports `attempted`
+     vs. `indexed`) so a *legitimately* empty index no longer gets misreported
+     as a crawl failure.
+- **Known gap flagged, not fixed here** (out of scope for this pass):
+  `cursorEntry.entryVersion` is populated from whichever of
+  `entry.Baseline.Version` (fresh/baseline fetch) or `entry.EntryVersion`
+  (change-file-chain application) `resolveCatalog` happens to return — these
+  are two different version counters per spec (`entryVersion` bumps on *any*
+  change; `baseline.version`/change `toVersion` track content lineage
+  separately, and the spec's own example has them completely unrelated:
+  `entryVersion: 7` alongside `baseline.version: 40`). Whenever they diverge,
+  the "unchanged, skip refetch" comparison in `applyEntry` compares
+  incompatible values and can spuriously refetch every crawl. Not hit by any
+  current fixture/test (which all keep the two aligned) but worth fixing
+  before this crawls anything with independently-numbered baseline/entry
+  versions.
+- **Still explicitly deferred** (per earlier scope agreement, unchanged by
+  this pass): a real HTTP-backed `Registry` client, Postgres cursor
+  persistence (M2), inbound `/discover` HTTP-signature verification (D15),
+  and `MasterRef`/cross-catalog MASTER dependency *resolution* (only
+  ordering — MASTER-before-REGULAR — is implemented; a REGULAR catalog's
+  declared dependency on an external MASTER catalog's `indexUrl` is never
+  actually followed).
+- Tests: `internal/dedicrawl` grew from 13 to 18 (regression-rejection,
+  absence/reconfirmation, fixture load + end-to-end seeded crawl);
+  `internal/config` gained coverage for the five new fields. All 108 tests
+  across 13 packages pass, `go vet` clean. Manually verified end to end: a
+  local run with `CATALOG_SOURCE_MODE=dedi`+`DEDI_FIXTURE_PATH` set served
+  the fixture's one catalog via `GET /discover`; the live production
+  container (`CATALOG_SOURCE_MODE` unset) was re-checked immediately after
+  and still served its usual 4 dashboard-sourced catalogs, unaffected.
+
+**D19 — In-memory `message.intent` matching, ahead of the Postgres-backed
+M3 (2026-09-16).** The user reported `/discover`'s search filter didn't work
+as documented. Root cause: `BuildOnDiscover` never looked at `message.intent`
+at all — `textSearch`/`filters`/`spatial`/`mediaSearch` were silently
+ignored, every configured catalog was always returned. The milestone plan
+(§5) scopes real query matching as M3, a full Postgres/PostGIS build-out
+(`pg_trgm`/`tsvector` for text, `jsonb_path_query` for filters, PostGIS for
+spatial) — but this repo has no database at all yet; catalogs already live
+entirely in memory (`CatalogStore.Catalogs()`). So this is a pragmatic,
+immediately-useful in-memory fix, not M3 itself — M3's Postgres-backed
+version (better performance/indexing at scale) remains the eventual target.
+
+- **New file `internal/service/match.go`**: `matchCatalogs(catalogs,
+  intent)` — the core filtering pipeline, applied inside `BuildOnDiscover`
+  (both `BuildOnDiscover`/`BuildFixedOnDiscover` gained an `intent
+  beckn.Intent` parameter; `ProcessAsync`/`BuildSync` in
+  `internal/service/discover.go` now pass `req.Message.Intent` through).
+  When `intent` is the zero value, `catalogs` is returned unchanged — every
+  existing caller/test that doesn't care about intent is unaffected.
+  - **Spatial**: only `op == "S_DWITHIN"` with a `Point` `geometry` and
+    `distanceMeters` set is evaluated (Haversine distance against each of
+    the catalog's `provider.availableAt[*].geo` points, `quantifier`
+    `"ANY"`/`"ALL"`) — the one operator with a concrete worked example
+    anywhere in this repo's docs (§6). Any other op/geometry combination is
+    treated as **permissively passing**, not a hard failure — an
+    unsupported CQL2 operator must never silently zero out every request
+    that happens to use it.
+  - **textSearch**: case-insensitive, all-whitespace-terms-must-match
+    against a resource's `descriptor.name`/`shortDesc`/`longDesc`.
+  - **filters**: `{type: "jsonpath", expression}` evaluated via
+    `github.com/theory/jsonpath` (new dependency) — an RFC 9535-compliant
+    implementation, matching the exact standard `beckn.yaml` cites. The
+    expression runs against the catalog's resources as a JSON array (the
+    natural shape for a filter-selector like the spec's own
+    `$[?(@.rating.value >= 4.0)]` example); resources are matched back by
+    `id`.
+  - **Offers** are kept if they have no `resourceIds` (catalog-wide) or
+    still reference at least one surviving resource; a catalog with zero
+    resources and zero offers left after filtering is dropped entirely.
+  - **mediaSearch is an explicit no-op** — there is no image/audio
+    similarity capability available in-memory. Not silently pretended to
+    work; a request that sets it just doesn't get filtered on that
+    dimension.
+- **Malformed `filters` is now a validation error, not a silent no-op or a
+  crash.** New `constants.ErrInvalidIntent` (`SCH_INVALID_INTENT`) and
+  `validateIntent` (`internal/service/discover.go`), called from both
+  `Validate` and `ValidateSync`: `filters.type` must be `"jsonpath"`,
+  `filters.expression` must parse. This has to happen at validation time
+  (before the `Ack`), not inside `BuildOnDiscover` — the async `POST
+  /discover` path already Acks before any catalog matching runs, so a bad
+  expression discovered only in the background could no longer become a
+  400. `textSearch`/`spatial` are never hard-rejected (partial support is
+  handled permissively at match time, per above).
+- **Existing test fixture fixed to not accidentally test the wrong thing**:
+  `internal/handlers/discover_test.go`'s shared `validRequestBody` hardcoded
+  `textSearch: "laptop"` against the embedded **coffee** demo catalog
+  (`internal/service/data/catalog.json`) — harmless while intent was
+  ignored, but would have zeroed out results and broken two transport tests
+  once real filtering landed. Blanked to `""` so those stay decoupled from
+  search relevance; new dedicated tests cover real `textSearch`/`filters`
+  behavior against the actual embedded data.
+- Explicitly out of scope for this pass: full CQL2 operator/geometry
+  coverage (only `S_DWITHIN`/`Point`), `mediaSearch`, returning
+  `AckNoCallback` for a zero-match result (a zero-catalog `on_discover` is
+  delivered instead — still a valid response), and relevance
+  ranking/scoring (matching is boolean, no ordering).
+- Tests: `internal/service/match_test.go` (new, 10 cases) + new
+  `validateIntent`/`BuildSync` cases in `discover_test.go` + 3 new handler
+  tests. 126 tests across 13 packages pass, `-race` clean. Manually verified
+  end to end against a local run (embedded demo catalog, not the live
+  container): `textSearch=coffee` → both coffee catalogs;
+  `textSearch=laptop` → `catalogs: []`, still `200 OK`; a `filters` JSONPath
+  expression narrowing to one specific resource ID → exactly that resource,
+  in its catalog. The live production container was independently confirmed
+  unaffected before and after.
+
+**D20 — Per-client rate limiting + a configurable intent-matching timeout,
+closing a DoS gap the D19 review surfaced (2026-09-16).** A senior-review
+pass over D19 flagged: before it, every `/discover` request did roughly
+constant work (intent was ignored); after it, request cost scales with both
+catalog size and the caller-supplied filter's complexity — and since
+inbound requests still aren't authenticated (D15), nothing bounded either
+how many requests a caller could issue or how long a single expensive
+filter could run. Two independent protections, both `.env`-configurable
+(CONTEXT.md D7):
+
+- **Rate limiting** — new `internal/handlers/ratelimit.go`, a per-client
+  (keyed by remote address, via `golang.org/x/time/rate` token buckets)
+  `RateLimiter.Middleware`, applied in `cmd/discovery/main.go` around both
+  `/discover` routes (not `/healthz`). Over-limit gets `429` via the
+  existing `writeNack` helper with a new `constants.ErrTooManyRequests`
+  (`beckn.yaml`'s `NackTooManyRequests` family, listed as a possible
+  `/discover` response in §6 but never implemented until now). A background
+  goroutine evicts idle clients' limiters after 5 minutes so the tracking
+  map can't grow unbounded. New config: `RATE_LIMIT_ENABLED` (default
+  `true`), `RATE_LIMIT_REQUESTS_PER_SECOND` (default `5`),
+  `RATE_LIMIT_BURST` (default `10`) — comfortably above any single real
+  BAP's expected call rate or this demo's own `catalogsource` polling
+  traffic.
+- **Match timeout** — `DiscoverService` gained a `matchTimeout`
+  (`MATCH_TIMEOUT_MILLISECONDS`, default `500ms`). `BuildOnDiscover`/
+  `BuildFixedOnDiscover`/`matchCatalogs` (`internal/service/response.go`,
+  `match.go`) all gained a leading `context.Context` parameter;
+  `matchCatalogs` checks `ctx.Err()` once per catalog in its main loop and
+  stops immediately once the deadline is hit, returning whatever's matched
+  so far rather than blocking until the full set is processed.
+  `BuildSync` wraps the incoming HTTP request's own context
+  (`r.Context()`, threaded from `internal/handlers/discover.go`'s
+  `ServeSync`) with this timeout; `ProcessAsync` wraps the worker's ctx the
+  same way, separately from the existing `deliverCtx`/`deliveryTimeout`
+  (which still only bounds the *dispatch* HTTP call afterward, not
+  matching). A timeout is logged (`"intent matching timed out, returning
+  partial results"`), never silent.
+- **Explicitly out of scope**: per-authenticated-identity rate limiting
+  (no inbound auth yet, D15 — this is necessarily IP-based, a weaker
+  signal); JSONPath expression complexity analysis (the timeout is a
+  blunter but sufficient backstop); distributed/shared rate limiting across
+  multiple instances (in-memory per-process only, matching every other
+  piece of state in this service today).
+- Tests: `internal/handlers/ratelimit_test.go` (new, 5 cases: within-burst
+  passes, over-burst gets 429/NACK, independent per-client budgets, host:port
+  key extraction + its fallback) + one `matchCatalogs` unit test (an
+  already-expired context stops matching before anything is processed) + one
+  `DiscoverService`-level test proving the wiring end to end (a near-zero
+  `matchTimeout` against the real embedded catalog store truncates results,
+  not just the isolated unit check). 133 tests across 13 packages pass,
+  `-race` clean.
+- **D18 bug found and fixed while actually turning `dedi` mode on for the
+  first time in Docker**: `DEDI_FIXTURE_PATH` is a relative path, but the
+  `Dockerfile`'s final stage only ever copied the compiled binary —
+  `internal/dedicrawl/testdata/` never existed inside the container, so
+  `dedi` mode would have silently fallen back to the embedded demo catalog
+  with only a log warning, never actually crawling anything. Fixed:
+  `Dockerfile` now copies `internal/dedicrawl/testdata` into the final image
+  at the same relative path (`WORKDIR /app`), and the build stage's base
+  image was bumped `golang:1.25-alpine` → `golang:1.26-alpine` (`go.mod`
+  had already moved to `go 1.26.0` from this decision's own `golang.org/x/time`
+  dependency, which the old build image couldn't satisfy). Verified live:
+  the production container now genuinely crawls the fixture and serves its
+  one demo catalog when `CATALOG_SOURCE_MODE=dedi` is set in `.env`.
+
+**D21 — A real, live DeDi registry exists and is reachable; `HTTPRegistry`
+built against it (2026-09-16).** The user found a `dediregistry` plugin
+config from a sibling project (`beckn-onix`) pointing at
+`https://fabric.nfh.global/registry/dedi`. Investigated and confirmed real
+(`curl` against it returns a proper `404 {"message":"record not found"}`
+for a made-up key — not a placeholder), and `beckn-onix`'s own Go client
+(`pkg/plugin/implementation/dediregistry/dediregistry.go`) gave the exact
+real API shape: `GET {url}/lookup/{namespace}/{registry}/{recordName}` →
+`{"data": {"details": {subscriber_id, signing_public_key, url}, "meta":
+{catalog_index_urls: [{url}, ...]}}}` — this supersedes the "no real,
+reachable DeDi Registry exists" framing in D18/D19/D20.
+
+- **Searched for a real, live subscriber to actually crawl** (checked
+  `sample-pn.ayushmatha.in`, seen earlier in an `onix-bap` log during D19's
+  investigation): found a genuine local onboarding *toolkit* at
+  `Ion Repo/reference-app/dedi-onboarding-files/` (`dedi-file-signer` +
+  generated `dedi.json`/`dedi.index.json` matching the real spec shape —
+  `dedi_version`, `domain`, `files[]`, `keys[]` JWK, `proof.jws` —
+  independently confirming the D18-flagged mismatch between our own
+  simplified `DediManifest`/`Signature` types and the real spec shape is
+  real). But neither the candidate domain (`ion-ref-app.ayushmatha.in`, DNS
+  `NXDOMAIN`) nor its registry record (`fabric.nfh.global` → `404 record
+  not found` for
+  `ion-ref-app.ayushmatha.in/ion-scratch-registry/sample-pn-ayushmatha-in`)
+  actually resolve. **This was local scratch/example tooling output, never
+  published live — no confirmed real subscriber to crawl exists yet.**
+  Per the user's explicit decision: build the real client anyway (it's
+  provably reachable and its shape is now known), don't invent a
+  subscriberRef.
+- **New `internal/dedicrawl/httpregistry.go`**: `HTTPRegistry` implements
+  the existing `Registry` interface unchanged — `crawl.go`/`cursor.go`/
+  every existing `StubRegistry`-based test needed zero changes.
+  `SubscriberRecord` requires `subscriberRef` in real `namespace/registry/recordName`
+  nodeID form (rejects anything else); parses `meta.catalog_index_urls`
+  defensively (native `{url}` array, or a JSON-double-encoded string
+  containing that same array — a real-world quirk `beckn-onix`'s own
+  client also guards against); since the real endpoint has no digest field
+  of its own, `HTTPRegistry` self-computes one via the already-exported
+  `CanonicalizeJCS`/`Digest` (same self-consistency step the fixture
+  already relied on — `verifySubscriberRecord` was already documented as
+  "a deliberately simplified trust check ... not a real registry-anchored
+  trust chain," unchanged by this). `Manifest` is a structural formality
+  (self-signed, same mechanism `StubRegistry` uses, factored into a shared
+  `selfSignedManifest` helper) — the real registry has no separate signed
+  manifest document; trust here is HTTPS + the registry operator, same as
+  any ordinary API.
+- **Config**: `DediRegistryMode` (`"fixture"` default / `"http"`),
+  `DediRegistryURL` (defaults to the confirmed-reachable public registry).
+  `buildDediCatalogStore` (`cmd/discovery/main.go`) branches on it; `http`
+  mode with no `DediSubscriberRefs` configured logs a warning and falls
+  back to the embedded demo catalog, same "nothing to serve yet" posture
+  every other unconfigured path in this function already has.
+- **Live `.env` left on `DEDI_REGISTRY_MODE=fixture`** — no behavior
+  change to what the running container actually serves; `DEDI_REGISTRY_URL`
+  is present and documented, ready to flip once a real subscriberRef is
+  confirmed.
+- **Still out of scope**: the D18-flagged `CatalogFile`/`IndexEntry` type
+  mismatches (`version` int vs. string, `Signature` object vs. string) —
+  those apply to a subscriber's *own* catalog files (fetched from whatever
+  URL its `catalog_index_urls` point at, not from the registry itself),
+  and there's no live catalog index to test a fix against yet regardless.
+- Tests: `internal/dedicrawl/httpregistry_test.go` (new, 6 cases: native and
+  double-encoded `catalog_index_urls` parsing, malformed-nodeID rejection,
+  404 and missing-signing-key errors, `Manifest` self-verification) +
+  `DediRegistryMode`/`DediRegistryURL` config coverage. 139 tests across 13
+  packages pass, `-race` clean.
+
 ## 5. Milestone plan (TDD, step by step)
 
 1. **M1 — Contract skeleton — DONE, then hardened for concurrency

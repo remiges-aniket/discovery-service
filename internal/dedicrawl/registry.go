@@ -10,11 +10,11 @@ import (
 // Registry is the port for resolving a Provider Node's Registry-anchored
 // identity (§10.2, steps 1-3): the Registry's own manifest (which anchors
 // its signing key) and a subscriber's record (which declares where its
-// catalog indexes live and its own public key). A real implementation
-// would fetch these over HTTPS from a network-operated Registry; no such
-// registry is reachable yet, so StubRegistry below is the only
-// implementation for now — swapping in an HTTP-backed one later is a
-// drop-in adapter change, same pattern as service.OnDiscoverDispatcher.
+// catalog indexes live and its own public key). StubRegistry (below) is an
+// in-memory fake for tests/fixtures; HTTPRegistry (httpregistry.go) is a
+// real implementation against a live DeDi registry (confirmed reachable —
+// see CONTEXT.md D21) — swapping between them is a drop-in adapter change,
+// same pattern as service.OnDiscoverDispatcher.
 type Registry interface {
 	// Manifest returns the Registry's own signed manifest (as served at
 	// /.well-known/dedi.json), used to anchor trust in the Registry's
@@ -63,14 +63,26 @@ func (r *StubRegistry) Seed(subscriberRef string, record SubscriberRecord, pubKe
 // signature — mirroring a real Registry's manifest being independently
 // trustworthy via HTTPS + the Registry's own well-known key.
 func (r *StubRegistry) Manifest(_ context.Context, _ string) (DediManifest, error) {
-	pub := r.registryKey.Public().(ed25519.PublicKey)
+	return selfSignedManifest(r.registryKey)
+}
+
+// selfSignedManifest builds a DediManifest self-signed by key. Shared by
+// every Registry implementation's Manifest method: none of them has a real
+// registry-hosted, independently-verifiable manifest document to fetch (see
+// HTTPRegistry.Manifest's doc comment for why that's true even for a real
+// registry), so each just needs a structurally valid, internally
+// self-consistent manifest to satisfy verifyManifest — a formality, not a
+// real trust anchor (crawl.go's CrawlSubscriber already discards the
+// resulting registryKey with exactly that caveat).
+func selfSignedManifest(key ed25519.PrivateKey) (DediManifest, error) {
+	pub := key.Public().(ed25519.PublicKey)
 	m := DediManifest{RegistryPublicKeyBase64: base64.StdEncoding.EncodeToString(pub)}
 
 	canonical, err := CanonicalizeJCS(m)
 	if err != nil {
 		return DediManifest{}, fmt.Errorf("canonicalize manifest: %w", err)
 	}
-	m.Signature = signDetached(r.registryKey, canonical)
+	m.Signature = signDetached(key, canonical)
 	return m, nil
 }
 

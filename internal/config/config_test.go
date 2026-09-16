@@ -67,6 +67,24 @@ func TestLoad_Defaults_WhenNoEnvVarsSet(t *testing.T) {
 	if cfg.SigningValidity != 5*time.Minute {
 		t.Errorf("SigningValidity = %v, want 5m", cfg.SigningValidity)
 	}
+	if cfg.CatalogSourceMode != "dashboard" {
+		t.Errorf("CatalogSourceMode = %q, want dashboard (must not change the live default)", cfg.CatalogSourceMode)
+	}
+	if len(cfg.DediSubscriberRefs) != 0 {
+		t.Errorf("DediSubscriberRefs = %v, want empty by default", cfg.DediSubscriberRefs)
+	}
+	if cfg.DediCutoverFraction != 0.5 {
+		t.Errorf("DediCutoverFraction = %v, want 0.5", cfg.DediCutoverFraction)
+	}
+	if cfg.DediFixturePath != "" {
+		t.Errorf("DediFixturePath = %q, want empty by default", cfg.DediFixturePath)
+	}
+	if cfg.DediRegistryMode != "fixture" {
+		t.Errorf("DediRegistryMode = %q, want fixture (must not change the live default)", cfg.DediRegistryMode)
+	}
+	if cfg.DediRegistryURL != "https://fabric.nfh.global/registry/dedi" {
+		t.Errorf("DediRegistryURL = %q, want the confirmed-reachable public registry default", cfg.DediRegistryURL)
+	}
 }
 
 func TestLoad_ReadsOverridesFromEnv(t *testing.T) {
@@ -85,6 +103,12 @@ func TestLoad_ReadsOverridesFromEnv(t *testing.T) {
 	t.Setenv("SIGNING_PRIVATE_KEY_BASE64", "c29tZS1iYXNlNjQtdmFsdWU=")
 	t.Setenv("SIGNING_KEY_ID", "key-2")
 	t.Setenv("SIGNING_VALIDITY_SECONDS", "60")
+	t.Setenv("CATALOG_SOURCE_MODE", "dedi")
+	t.Setenv("DEDI_SUBSCRIBER_REFS", "pn-1,pn-2")
+	t.Setenv("DEDI_CUTOVER_FRACTION", "0.25")
+	t.Setenv("DEDI_FIXTURE_PATH", "internal/dedicrawl/testdata/sample-fixture.json")
+	t.Setenv("DEDI_REGISTRY_MODE", "http")
+	t.Setenv("DEDI_REGISTRY_URL", "https://registry.example.test/dedi")
 
 	cfg := Load()
 
@@ -130,6 +154,24 @@ func TestLoad_ReadsOverridesFromEnv(t *testing.T) {
 	if cfg.SigningValidity != 60*time.Second {
 		t.Errorf("SigningValidity = %v, want 60s", cfg.SigningValidity)
 	}
+	if cfg.CatalogSourceMode != "dedi" {
+		t.Errorf("CatalogSourceMode = %q, want dedi", cfg.CatalogSourceMode)
+	}
+	if len(cfg.DediSubscriberRefs) != 2 || cfg.DediSubscriberRefs[0] != "pn-1" || cfg.DediSubscriberRefs[1] != "pn-2" {
+		t.Errorf("DediSubscriberRefs = %v, want [pn-1 pn-2]", cfg.DediSubscriberRefs)
+	}
+	if cfg.DediCutoverFraction != 0.25 {
+		t.Errorf("DediCutoverFraction = %v, want 0.25", cfg.DediCutoverFraction)
+	}
+	if cfg.DediFixturePath != "internal/dedicrawl/testdata/sample-fixture.json" {
+		t.Errorf("DediFixturePath = %q, want internal/dedicrawl/testdata/sample-fixture.json", cfg.DediFixturePath)
+	}
+	if cfg.DediRegistryMode != "http" {
+		t.Errorf("DediRegistryMode = %q, want http", cfg.DediRegistryMode)
+	}
+	if cfg.DediRegistryURL != "https://registry.example.test/dedi" {
+		t.Errorf("DediRegistryURL = %q, want https://registry.example.test/dedi", cfg.DediRegistryURL)
+	}
 }
 
 func TestLoad_FallsBackToDefaultOnInvalidDuration(t *testing.T) {
@@ -140,6 +182,17 @@ func TestLoad_FallsBackToDefaultOnInvalidDuration(t *testing.T) {
 
 	if cfg.DispatchClientTimeout != 10*time.Second {
 		t.Errorf("DispatchClientTimeout = %v, want fallback default 10s", cfg.DispatchClientTimeout)
+	}
+}
+
+func TestLoad_FallsBackToDefaultOnInvalidFloat(t *testing.T) {
+	t.Chdir(t.TempDir()) // isolate from this repo's own .env, see above
+	t.Setenv("DEDI_CUTOVER_FRACTION", "not-a-number")
+
+	cfg := Load()
+
+	if cfg.DediCutoverFraction != 0.5 {
+		t.Errorf("DediCutoverFraction = %v, want fallback default 0.5", cfg.DediCutoverFraction)
 	}
 }
 

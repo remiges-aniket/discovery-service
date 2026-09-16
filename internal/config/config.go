@@ -53,6 +53,36 @@ const (
 	// Config.CatalogRefreshInterval/CatalogFetchTimeout and CONTEXT.md D17.
 	defaultCatalogRefreshInterval = 60 * time.Second
 	defaultCatalogFetchTimeout    = 10 * time.Second
+
+	// defaultCatalogSourceMode preserves today's behavior (internal
+	// dashboard-API polling) unless a deployment opts into "dedi" — see
+	// Config.CatalogSourceMode and CONTEXT.md D18.
+	defaultCatalogSourceMode = "dashboard"
+
+	// defaultDediCutoverFraction matches dedicrawl's own
+	// defaultCutoverFraction.
+	defaultDediCutoverFraction = 0.5
+
+	// defaultDediRegistryMode preserves today's fixture-only behavior
+	// unless a deployment opts into "http" — see Config.DediRegistryMode
+	// and CONTEXT.md D21.
+	defaultDediRegistryMode = "fixture"
+	// defaultDediRegistryURL is the confirmed-reachable public DeDi
+	// registry — see CONTEXT.md D21.
+	defaultDediRegistryURL = "https://fabric.nfh.global/registry/dedi"
+
+	// defaultRateLimitRequestsPerSecond/Burst — see
+	// Config.RateLimitRequestsPerSecond/RateLimitBurst and CONTEXT.md D20.
+	// Comfortably above any single real BAP's expected call rate or the
+	// demo catalogsource traffic pattern, while still bounding a runaway
+	// caller.
+	defaultRateLimitRequestsPerSecond = 5.0
+	defaultRateLimitBurst             = 10
+
+	// defaultMatchTimeout bounds a single request's intent matching
+	// (matchCatalogs) — see Config.MatchTimeout and CONTEXT.md D20. A
+	// filter is expected to complete in well under this.
+	defaultMatchTimeout = 500 * time.Millisecond
 )
 
 // Config holds all runtime-configurable values for the service.
@@ -143,6 +173,64 @@ type Config struct {
 	// CatalogFetchTimeout bounds a single HTTP call (list or detail) to a
 	// catalog source.
 	CatalogFetchTimeout time.Duration
+
+	// CatalogSourceMode selects which catalog-ingestion mechanism
+	// buildCatalogStore (cmd/discovery/main.go) wires up: "dashboard"
+	// (default — internal/catalogsource, unchanged, CONTEXT.md D17) or
+	// "dedi" (internal/dedicrawl, the protocol-specifications-v2 §10
+	// decentralized crawler — see CONTEXT.md D18). Any other/unset value
+	// behaves as "dashboard".
+	CatalogSourceMode string
+
+	// DediSubscriberRefs is the list of Provider Node subscriber
+	// references dedicrawl.Crawler crawls when CatalogSourceMode is
+	// "dedi". Ignored otherwise.
+	DediSubscriberRefs []string
+	// DediNetworkIDs/DediSchemaTypes optionally scope which catalog-index
+	// entries get indexed at all (dedicrawl.Crawler.inScope). Empty means
+	// "accept everything".
+	DediNetworkIDs  []string
+	DediSchemaTypes []string
+	// DediCutoverFraction is the §10.1 cutover rule's threshold — see
+	// dedicrawl.NewCrawler.
+	DediCutoverFraction float64
+	// DediFixturePath points at a checked-in dev/demo fixture (see
+	// internal/dedicrawl/fixture.go) used to seed a dedicrawl.StubRegistry
+	// with self-signed catalog data. Only read when DediRegistryMode is
+	// "fixture" (the default). Required for that mode to serve anything;
+	// if empty or unreadable, buildCatalogStore logs a warning and falls
+	// back to service.EmbeddedCatalogStore{} rather than starting with an
+	// empty catalog.
+	DediFixturePath string
+	// DediRegistryMode selects which dedicrawl.Registry backend "dedi"
+	// catalog-source mode uses: "fixture" (default — DediFixturePath's
+	// self-signed dev/demo data, no real registry involved) or "http" (a
+	// real dedicrawl.HTTPRegistry against DediRegistryURL — see
+	// CONTEXT.md D21; confirmed reachable, but requires a real, live
+	// subscriberRef in DediSubscriberRefs to have anything to crawl).
+	DediRegistryMode string
+	// DediRegistryURL is the real DeDi registry HTTPRegistry queries when
+	// DediRegistryMode is "http". Defaults to the confirmed-reachable
+	// public registry at fabric.nfh.global; only actually called when
+	// "http" mode is selected.
+	DediRegistryURL string
+
+	// RateLimitEnabled/RequestsPerSecond/Burst bound how often a single
+	// client (keyed by remote address) may call /discover — see
+	// internal/handlers.RateLimiter and CONTEXT.md D20. Necessary because
+	// inbound requests aren't authenticated yet (D15): without some limit,
+	// nothing bounds how many requests, each now doing real matching work
+	// (D19), a single caller can issue.
+	RateLimitEnabled           bool
+	RateLimitRequestsPerSecond float64
+	RateLimitBurst             int
+
+	// MatchTimeout bounds how long a single request's intent matching
+	// (service.matchCatalogs) is allowed to run before it's cut short and
+	// whatever's matched so far is returned — see CONTEXT.md D20. Protects
+	// against one expensive filter expression even from a client that's
+	// within its rate limit.
+	MatchTimeout time.Duration
 }
 
 // Addr returns the listen address (":<port>") for http.ListenAndServe.
@@ -188,6 +276,21 @@ func Load() Config {
 		CatalogSourceURLs:      getStringSlice("CATALOG_SOURCE_URLS"),
 		CatalogRefreshInterval: getSeconds("CATALOG_REFRESH_INTERVAL_SECONDS", defaultCatalogRefreshInterval),
 		CatalogFetchTimeout:    getSeconds("CATALOG_FETCH_TIMEOUT_SECONDS", defaultCatalogFetchTimeout),
+
+		CatalogSourceMode:   getString("CATALOG_SOURCE_MODE", defaultCatalogSourceMode),
+		DediSubscriberRefs:  getStringSlice("DEDI_SUBSCRIBER_REFS"),
+		DediNetworkIDs:      getStringSlice("DEDI_NETWORK_IDS"),
+		DediSchemaTypes:     getStringSlice("DEDI_SCHEMA_TYPES"),
+		DediCutoverFraction: getFloat("DEDI_CUTOVER_FRACTION", defaultDediCutoverFraction),
+		DediFixturePath:     getString("DEDI_FIXTURE_PATH", ""),
+		DediRegistryMode:    getString("DEDI_REGISTRY_MODE", defaultDediRegistryMode),
+		DediRegistryURL:     getString("DEDI_REGISTRY_URL", defaultDediRegistryURL),
+
+		RateLimitEnabled:           getBool("RATE_LIMIT_ENABLED", true),
+		RateLimitRequestsPerSecond: getFloat("RATE_LIMIT_REQUESTS_PER_SECOND", defaultRateLimitRequestsPerSecond),
+		RateLimitBurst:             getInt("RATE_LIMIT_BURST", defaultRateLimitBurst),
+
+		MatchTimeout: getMillis("MATCH_TIMEOUT_MILLISECONDS", defaultMatchTimeout),
 	}
 }
 
@@ -241,6 +344,48 @@ func getInt(key string, fallback int) int {
 		return fallback
 	}
 	return n
+}
+
+func getFloat(key string, fallback float64) float64 {
+	v := os.Getenv(key)
+	if v == "" {
+		return fallback
+	}
+	f, err := strconv.ParseFloat(v, 64)
+	if err != nil {
+		slog.Warn("invalid float env var, using default", "key", key, "value", v, "default", fallback)
+		return fallback
+	}
+	return f
+}
+
+func getBool(key string, fallback bool) bool {
+	v := os.Getenv(key)
+	if v == "" {
+		return fallback
+	}
+	b, err := strconv.ParseBool(v)
+	if err != nil {
+		slog.Warn("invalid boolean env var, using default", "key", key, "value", v, "default", fallback)
+		return fallback
+	}
+	return b
+}
+
+// getMillis parses key as an integer count of milliseconds — finer-grained
+// than getSeconds, for timeouts (like MatchTimeout) expected to be well
+// under a second.
+func getMillis(key string, fallback time.Duration) time.Duration {
+	v := os.Getenv(key)
+	if v == "" {
+		return fallback
+	}
+	millis, err := strconv.Atoi(v)
+	if err != nil {
+		slog.Warn("invalid integer env var, using default", "key", key, "value", v, "default", fallback)
+		return fallback
+	}
+	return time.Duration(millis) * time.Millisecond
 }
 
 func getInt64(key string, fallback int64) int64 {

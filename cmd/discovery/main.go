@@ -14,6 +14,7 @@ import (
 	"github.com/remiges-tech/logharbour/logharbour"
 	"github.com/remiges-tushar/discovery-service/internal/catalogsource"
 	"github.com/remiges-tushar/discovery-service/internal/config"
+	"github.com/remiges-tushar/discovery-service/internal/dedicrawl"
 	"github.com/remiges-tushar/discovery-service/internal/dispatch"
 	"github.com/remiges-tushar/discovery-service/internal/handlers"
 	"github.com/remiges-tushar/discovery-service/internal/logging"
@@ -36,12 +37,18 @@ func main() {
 	catalogStore, stopCatalogRefresh := buildCatalogStore(cfg, logger)
 	defer stopCatalogRefresh()
 
-	svc := service.NewDiscoverService(dispatcher, pool, cfg.DispatchDeliveryTimeout, logger, cfg.BppID, cfg.BppURI, catalogStore)
+	svc := service.NewDiscoverService(dispatcher, pool, cfg.DispatchDeliveryTimeout, logger, cfg.BppID, cfg.BppURI, catalogStore, cfg.MatchTimeout)
 	discoverHandler := handlers.NewDiscoverHandler(svc, cfg.MaxRequestBodyBytes, logger)
 
 	mux := http.NewServeMux()
-	mux.Handle("POST /discover", discoverHandler)
-	mux.HandleFunc("GET /discover", discoverHandler.ServeSync)
+	if cfg.RateLimitEnabled {
+		rateLimiter := handlers.NewRateLimiter(cfg.RateLimitRequestsPerSecond, cfg.RateLimitBurst, logger)
+		mux.Handle("POST /discover", rateLimiter.Middleware(discoverHandler))
+		mux.Handle("GET /discover", rateLimiter.Middleware(http.HandlerFunc(discoverHandler.ServeSync)))
+	} else {
+		mux.Handle("POST /discover", discoverHandler)
+		mux.HandleFunc("GET /discover", discoverHandler.ServeSync)
+	}
 	mux.HandleFunc("GET /healthz", func(w http.ResponseWriter, r *http.Request) {
 		w.WriteHeader(http.StatusOK)
 		_, _ = w.Write([]byte("ok"))
@@ -144,14 +151,30 @@ func buildSigner(cfg config.Config, logger *logharbour.Logger) dispatch.RequestS
 // stop function to cancel any background refresh goroutine it started
 // (call it during shutdown; safe to call even when nothing was started).
 //
-// With no CATALOG_SOURCE_URLS configured, it returns the zero-config
-// embedded demo catalog (service.EmbeddedCatalogStore), unchanged from
-// M1. Otherwise it builds a catalogsource.Store, does one synchronous
-// Refresh now (bounded by CatalogFetchTimeout per HTTP call) so the first
-// real requests already see fresh data if the configured sources are
-// reachable, then starts background polling at CatalogRefreshInterval —
-// see CONTEXT.md D17.
+// cfg.CatalogSourceMode selects the mechanism (see CONTEXT.md D17/D18):
+//   - "dashboard" (default): unchanged from before this switch existed. With
+//     no CATALOG_SOURCE_URLS configured, returns the zero-config embedded
+//     demo catalog (service.EmbeddedCatalogStore). Otherwise builds a
+//     catalogsource.Store polling each configured BPP's dashboard API.
+//   - "dedi": builds a dedicrawl.Store crawling Provider Nodes per
+//     protocol-specifications-v2 §10. No real, reachable DeDi Registry
+//     exists yet, so this mode only has data to serve when
+//     cfg.DediFixturePath points at a dev/demo fixture (see
+//     dedicrawl.SeedFixture); with no usable fixture it logs a warning and
+//     falls back to the embedded demo catalog rather than starting with
+//     nothing.
+//
+// Both branches do one synchronous Refresh now (so the first real request
+// already sees fresh data if reachable) then start background polling at
+// CatalogRefreshInterval.
 func buildCatalogStore(cfg config.Config, logger *logharbour.Logger) (service.CatalogStore, func()) {
+	if cfg.CatalogSourceMode == "dedi" {
+		return buildDediCatalogStore(cfg, logger)
+	}
+	return buildDashboardCatalogStore(cfg, logger)
+}
+
+func buildDashboardCatalogStore(cfg config.Config, logger *logharbour.Logger) (service.CatalogStore, func()) {
 	if len(cfg.CatalogSourceURLs) == 0 {
 		return service.EmbeddedCatalogStore{}, func() {}
 	}
@@ -172,4 +195,85 @@ func buildCatalogStore(cfg config.Config, logger *logharbour.Logger) (service.Ca
 	go store.Start(refreshCtx)
 
 	return store, stopRefresh
+}
+
+// buildDediCatalogStore wires the internal/dedicrawl §10 crawler in place
+// of catalogsource, using one of two dedicrawl.Registry backends selected
+// by cfg.DediRegistryMode (see CONTEXT.md D18/D21):
+//   - "fixture" (default): dedicrawl.StubRegistry seeded from a checked-in
+//     dev/demo fixture file (cfg.DediFixturePath) — see dedicrawl.SeedFixture.
+//   - "http": dedicrawl.HTTPRegistry against a real, live DeDi registry
+//     (cfg.DediRegistryURL — confirmed reachable). Requires a real,
+//     registered subscriberRef in cfg.DediSubscriberRefs to have anything
+//     to crawl; there's no fixture-seeded fallback list in this mode.
+func buildDediCatalogStore(cfg config.Config, logger *logharbour.Logger) (service.CatalogStore, func()) {
+	var registry dedicrawl.Registry
+	var subscriberRefs []string
+	stopRegistry := func() {}
+
+	if cfg.DediRegistryMode == "http" {
+		if len(cfg.DediSubscriberRefs) == 0 {
+			logger.Warn().LogActivity("CATALOG_SOURCE_MODE=dedi, DEDI_REGISTRY_MODE=http but DEDI_SUBSCRIBER_REFS is unset — nothing configured to crawl, falling back to the embedded demo catalog", nil)
+			return service.EmbeddedCatalogStore{}, func() {}
+		}
+		httpRegistry, err := dedicrawl.NewHTTPRegistry(cfg.DediRegistryURL, &http.Client{Timeout: cfg.CatalogFetchTimeout})
+		if err != nil {
+			logger.Err().LogActivity("failed to build HTTP dedi registry client, falling back to the embedded demo catalog", map[string]any{"error": err.Error(), "registryUrl": cfg.DediRegistryURL})
+			return service.EmbeddedCatalogStore{}, func() {}
+		}
+		registry = httpRegistry
+		subscriberRefs = cfg.DediSubscriberRefs
+		logger.LogActivity("dedi catalog source configured against a real registry, crawling for catalog data", map[string]any{
+			"registryUrl":     cfg.DediRegistryURL,
+			"subscriberRefs":  subscriberRefs,
+			"refreshInterval": cfg.CatalogRefreshInterval.String(),
+		})
+	} else {
+		if cfg.DediFixturePath == "" {
+			logger.Warn().LogActivity("CATALOG_SOURCE_MODE=dedi, DEDI_REGISTRY_MODE=fixture but DEDI_FIXTURE_PATH is unset, falling back to the embedded demo catalog", nil)
+			return service.EmbeddedCatalogStore{}, func() {}
+		}
+
+		fx, err := dedicrawl.LoadFixture(cfg.DediFixturePath)
+		if err != nil {
+			logger.Err().LogActivity("failed to load dedi fixture, falling back to the embedded demo catalog", map[string]any{"error": err.Error(), "path": cfg.DediFixturePath})
+			return service.EmbeddedCatalogStore{}, func() {}
+		}
+
+		stubRegistry, fixtureRefs, stopFixture, err := dedicrawl.SeedFixture(fx)
+		if err != nil {
+			logger.Err().LogActivity("failed to seed dedi fixture, falling back to the embedded demo catalog", map[string]any{"error": err.Error(), "path": cfg.DediFixturePath})
+			return service.EmbeddedCatalogStore{}, func() {}
+		}
+		registry = stubRegistry
+		stopRegistry = stopFixture
+
+		// DediSubscriberRefs lets an operator crawl only a subset of what
+		// the fixture declares; unset means "everything the fixture seeded".
+		subscriberRefs = cfg.DediSubscriberRefs
+		if len(subscriberRefs) == 0 {
+			subscriberRefs = fixtureRefs
+		}
+
+		logger.LogActivity("dedi catalog source configured from fixture, crawling for catalog data", map[string]any{
+			"fixturePath":     cfg.DediFixturePath,
+			"subscriberRefs":  subscriberRefs,
+			"refreshInterval": cfg.CatalogRefreshInterval.String(),
+		})
+	}
+
+	crawler := dedicrawl.NewCrawler(registry, "", &http.Client{Timeout: cfg.CatalogFetchTimeout}, logger, cfg.DediNetworkIDs, cfg.DediSchemaTypes, cfg.DediCutoverFraction)
+	store := dedicrawl.NewStore(crawler, subscriberRefs, cfg.CatalogRefreshInterval, logger)
+
+	initialCtx, initialCancel := context.WithTimeout(context.Background(), cfg.CatalogFetchTimeout*time.Duration(len(subscriberRefs)+1))
+	store.Refresh(initialCtx)
+	initialCancel()
+
+	refreshCtx, stopRefresh := context.WithCancel(context.Background())
+	go store.Start(refreshCtx)
+
+	return store, func() {
+		stopRefresh()
+		stopRegistry()
+	}
 }
