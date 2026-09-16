@@ -22,6 +22,11 @@ func testLogger() *logharbour.Logger {
 	return logharbour.NewLoggerWithFallback(ctx, "handlers-test", logharbour.NewFallbackWriter(io.Discard, io.Discard))
 }
 
+// validRequestBody deliberately leaves textSearch blank (matches
+// everything) — these are transport/wiring tests, not search-relevance
+// tests (see match_test.go / the handler tests below for those), and
+// shouldn't need updating whenever the embedded demo catalog's content
+// changes.
 func validRequestBody(bapURI string) string {
 	return `{
 		"context": {
@@ -32,7 +37,7 @@ func validRequestBody(bapURI string) string {
 			"transactionId": "txn-1",
 			"messageId": "msg-1"
 		},
-		"message": { "intent": { "textSearch": "laptop" } }
+		"message": { "intent": {} }
 	}`
 }
 
@@ -41,7 +46,7 @@ func newTestHandler(t *testing.T) *DiscoverHandler {
 	pool := worker.NewPool(2, 4, testLogger())
 	t.Cleanup(func() { _ = pool.Shutdown(context.Background()) })
 
-	svc := service.NewDiscoverService(dispatch.NewHTTPDispatcher(client, "/on_discover", nil), pool, 2*time.Second, testLogger(), "own-bpp.example.com", "https://own-bpp.example.com", service.EmbeddedCatalogStore{})
+	svc := service.NewDiscoverService(dispatch.NewHTTPDispatcher(client, "/on_discover", nil), pool, 2*time.Second, testLogger(), "own-bpp.example.com", "https://own-bpp.example.com", service.EmbeddedCatalogStore{}, 2*time.Second)
 	return NewDiscoverHandler(svc, testMaxBodyBytes, testLogger())
 }
 
@@ -168,7 +173,7 @@ func TestDiscoverHandler_ServeSync_ValidRequest_ReturnsOnDiscoverInline(t *testi
 			"transactionId": "txn-sync-1",
 			"messageId": "msg-sync-1"
 		},
-		"message": { "intent": { "textSearch": "laptop" } }
+		"message": { "intent": {} }
 	}`
 	req := httptest.NewRequest(http.MethodGet, "/discover", strings.NewReader(body))
 	rec := httptest.NewRecorder()
@@ -224,6 +229,66 @@ func TestDiscoverHandler_ServeSync_MissingTransactionID_ReturnsNack400(t *testin
 	}
 	if ack.Status != "NACK" {
 		t.Errorf("status = %q, want NACK", ack.Status)
+	}
+}
+
+// textSearch actually narrows results now (see internal/service/match.go) —
+// "coffee" matches the embedded demo catalog's real content
+// (internal/service/data/catalog.json).
+func TestDiscoverHandler_ServeSync_TextSearchMatchingRealData_ReturnsCatalog(t *testing.T) {
+	h := newTestHandler(t)
+	body := `{"context":{"transactionId":"t","messageId":"m"},"message":{"intent":{"textSearch":"coffee"}}}`
+	req := httptest.NewRequest(http.MethodGet, "/discover", strings.NewReader(body))
+	rec := httptest.NewRecorder()
+
+	h.ServeSync(rec, req)
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d, want 200; body=%s", rec.Code, rec.Body.String())
+	}
+	var resp beckn.OnDiscoverRequest
+	if err := json.Unmarshal(rec.Body.Bytes(), &resp); err != nil {
+		t.Fatalf("decode on_discover response: %v", err)
+	}
+	if len(resp.Message.Catalogs) == 0 {
+		t.Error("expected textSearch=coffee to match the embedded coffee catalog")
+	}
+}
+
+// A textSearch term matching nothing is still a valid, successful result —
+// an empty catalogs array, not an error.
+func TestDiscoverHandler_ServeSync_TextSearchMatchingNothing_ReturnsEmptyCatalogs(t *testing.T) {
+	h := newTestHandler(t)
+	body := `{"context":{"transactionId":"t","messageId":"m"},"message":{"intent":{"textSearch":"doesnotexist12345"}}}`
+	req := httptest.NewRequest(http.MethodGet, "/discover", strings.NewReader(body))
+	rec := httptest.NewRecorder()
+
+	h.ServeSync(rec, req)
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d, want 200 (no match is a valid empty result, not an error); body=%s", rec.Code, rec.Body.String())
+	}
+	var resp beckn.OnDiscoverRequest
+	if err := json.Unmarshal(rec.Body.Bytes(), &resp); err != nil {
+		t.Fatalf("decode on_discover response: %v", err)
+	}
+	if len(resp.Message.Catalogs) != 0 {
+		t.Errorf("expected zero catalogs for a non-matching textSearch, got %d", len(resp.Message.Catalogs))
+	}
+}
+
+// An unparseable filters.expression is a validation error, not a 500 or a
+// silently-ignored filter — see service.validateIntent.
+func TestDiscoverHandler_ServeSync_InvalidFilterExpression_ReturnsNack400(t *testing.T) {
+	h := newTestHandler(t)
+	body := `{"context":{"transactionId":"t","messageId":"m"},"message":{"intent":{"filters":{"type":"jsonpath","expression":"not a jsonpath ["}}}}`
+	req := httptest.NewRequest(http.MethodGet, "/discover", strings.NewReader(body))
+	rec := httptest.NewRecorder()
+
+	h.ServeSync(rec, req)
+
+	if rec.Code != http.StatusBadRequest {
+		t.Fatalf("status = %d, want 400 for an unparseable filters.expression; body=%s", rec.Code, rec.Body.String())
 	}
 }
 

@@ -54,7 +54,7 @@ func (f *fakeDispatcher) Deliver(_ context.Context, _ string, payload beckn.OnDi
 }
 
 func TestValidate_RejectsMissingRequiredFields(t *testing.T) {
-	svc := NewDiscoverService(newFakeDispatcher(), newTestRunner(t), time.Second, testLogger(), "own-bpp.example.com", "https://own-bpp.example.com", EmbeddedCatalogStore{})
+	svc := NewDiscoverService(newFakeDispatcher(), newTestRunner(t), time.Second, testLogger(), "own-bpp.example.com", "https://own-bpp.example.com", EmbeddedCatalogStore{}, time.Second)
 
 	cases := []struct {
 		name string
@@ -75,7 +75,7 @@ func TestValidate_RejectsMissingRequiredFields(t *testing.T) {
 }
 
 func TestValidate_AcceptsRequestWithRequiredFields(t *testing.T) {
-	svc := NewDiscoverService(newFakeDispatcher(), newTestRunner(t), time.Second, testLogger(), "own-bpp.example.com", "https://own-bpp.example.com", EmbeddedCatalogStore{})
+	svc := NewDiscoverService(newFakeDispatcher(), newTestRunner(t), time.Second, testLogger(), "own-bpp.example.com", "https://own-bpp.example.com", EmbeddedCatalogStore{}, time.Second)
 	req := beckn.DiscoverRequest{Context: beckn.Context{TransactionID: "t", MessageID: "m", BapURI: "https://bap"}}
 
 	if errCode, errMsg := svc.Validate(req); errCode != "" {
@@ -87,7 +87,7 @@ func TestValidate_AcceptsRequestWithRequiredFields(t *testing.T) {
 // and must NOT require context.bapUri — a synchronous caller has no
 // callback to address.
 func TestValidateSync_DoesNotRequireBapUri(t *testing.T) {
-	svc := NewDiscoverService(newFakeDispatcher(), newTestRunner(t), time.Second, testLogger(), "own-bpp.example.com", "https://own-bpp.example.com", EmbeddedCatalogStore{})
+	svc := NewDiscoverService(newFakeDispatcher(), newTestRunner(t), time.Second, testLogger(), "own-bpp.example.com", "https://own-bpp.example.com", EmbeddedCatalogStore{}, time.Second)
 	req := beckn.DiscoverRequest{Context: beckn.Context{TransactionID: "t", MessageID: "m"}}
 
 	if errCode, errMsg := svc.ValidateSync(req); errCode != "" {
@@ -96,7 +96,7 @@ func TestValidateSync_DoesNotRequireBapUri(t *testing.T) {
 }
 
 func TestValidateSync_StillRequiresTransactionIDAndMessageID(t *testing.T) {
-	svc := NewDiscoverService(newFakeDispatcher(), newTestRunner(t), time.Second, testLogger(), "own-bpp.example.com", "https://own-bpp.example.com", EmbeddedCatalogStore{})
+	svc := NewDiscoverService(newFakeDispatcher(), newTestRunner(t), time.Second, testLogger(), "own-bpp.example.com", "https://own-bpp.example.com", EmbeddedCatalogStore{}, time.Second)
 
 	cases := []struct {
 		name string
@@ -114,11 +114,61 @@ func TestValidateSync_StillRequiresTransactionIDAndMessageID(t *testing.T) {
 	}
 }
 
+func TestValidate_RejectsUnsupportedFiltersType(t *testing.T) {
+	svc := NewDiscoverService(newFakeDispatcher(), newTestRunner(t), time.Second, testLogger(), "own-bpp.example.com", "https://own-bpp.example.com", EmbeddedCatalogStore{}, time.Second)
+	req := beckn.DiscoverRequest{
+		Context: beckn.Context{TransactionID: "t", MessageID: "m", BapURI: "https://bap"},
+		Message: beckn.DiscoverMessage{Intent: beckn.Intent{Filters: &beckn.Filters{Type: "xpath", Expression: "//*"}}},
+	}
+
+	errCode, errMsg := svc.Validate(req)
+	if errCode == "" {
+		t.Fatalf("expected a validation error for an unsupported filters.type, got none (msg=%q)", errMsg)
+	}
+}
+
+func TestValidate_RejectsUnparseableJSONPathExpression(t *testing.T) {
+	svc := NewDiscoverService(newFakeDispatcher(), newTestRunner(t), time.Second, testLogger(), "own-bpp.example.com", "https://own-bpp.example.com", EmbeddedCatalogStore{}, time.Second)
+	req := beckn.DiscoverRequest{
+		Context: beckn.Context{TransactionID: "t", MessageID: "m", BapURI: "https://bap"},
+		Message: beckn.DiscoverMessage{Intent: beckn.Intent{Filters: &beckn.Filters{Type: "jsonpath", Expression: "not a jsonpath ["}}},
+	}
+
+	errCode, errMsg := svc.Validate(req)
+	if errCode == "" {
+		t.Fatalf("expected a validation error for an unparseable JSONPath expression, got none (msg=%q)", errMsg)
+	}
+}
+
+func TestValidate_AcceptsValidJSONPathFilter(t *testing.T) {
+	svc := NewDiscoverService(newFakeDispatcher(), newTestRunner(t), time.Second, testLogger(), "own-bpp.example.com", "https://own-bpp.example.com", EmbeddedCatalogStore{}, time.Second)
+	req := beckn.DiscoverRequest{
+		Context: beckn.Context{TransactionID: "t", MessageID: "m", BapURI: "https://bap"},
+		Message: beckn.DiscoverMessage{Intent: beckn.Intent{Filters: &beckn.Filters{Type: "jsonpath", Expression: "$[?(@.rating.value >= 4.0)]"}}},
+	}
+
+	if errCode, errMsg := svc.Validate(req); errCode != "" {
+		t.Fatalf("unexpected validation error for a valid JSONPath filter: %s / %s", errCode, errMsg)
+	}
+}
+
+func TestValidateSync_RejectsUnparseableJSONPathExpression(t *testing.T) {
+	svc := NewDiscoverService(newFakeDispatcher(), newTestRunner(t), time.Second, testLogger(), "own-bpp.example.com", "https://own-bpp.example.com", EmbeddedCatalogStore{}, time.Second)
+	req := beckn.DiscoverRequest{
+		Context: beckn.Context{TransactionID: "t", MessageID: "m"},
+		Message: beckn.DiscoverMessage{Intent: beckn.Intent{Filters: &beckn.Filters{Type: "jsonpath", Expression: "not a jsonpath ["}}},
+	}
+
+	if errCode, _ := svc.ValidateSync(req); errCode == "" {
+		t.Fatal("expected a validation error for an unparseable JSONPath expression on the sync path")
+	}
+}
+
 func TestBuildSync_ReturnsOnDiscoverPayloadDirectly(t *testing.T) {
-	svc := NewDiscoverService(newFakeDispatcher(), newTestRunner(t), time.Second, testLogger(), "own-bpp.example.com", "https://own-bpp.example.com", EmbeddedCatalogStore{})
+	svc := NewDiscoverService(newFakeDispatcher(), newTestRunner(t), time.Second, testLogger(), "own-bpp.example.com", "https://own-bpp.example.com", EmbeddedCatalogStore{}, time.Second)
 	req := beckn.DiscoverRequest{Context: beckn.Context{TransactionID: "t1", MessageID: "m1"}}
 
-	got := svc.BuildSync(req)
+	got := svc.BuildSync(t.Context(), req)
 
 	if got.Context.Action != "on_discover" {
 		t.Errorf("context.action = %q, want on_discover", got.Context.Action)
@@ -131,9 +181,44 @@ func TestBuildSync_ReturnsOnDiscoverPayloadDirectly(t *testing.T) {
 	}
 }
 
+func TestBuildSync_TextSearchNarrowsToMatchingCatalogsOnly(t *testing.T) {
+	svc := NewDiscoverService(newFakeDispatcher(), newTestRunner(t), time.Second, testLogger(), "own-bpp.example.com", "https://own-bpp.example.com", EmbeddedCatalogStore{}, time.Second)
+
+	matching := svc.BuildSync(t.Context(), beckn.DiscoverRequest{
+		Context: beckn.Context{TransactionID: "t", MessageID: "m"},
+		Message: beckn.DiscoverMessage{Intent: beckn.Intent{TextSearch: "coffee"}},
+	})
+	if len(matching.Message.Catalogs) == 0 {
+		t.Error("expected textSearch=coffee to match the embedded coffee demo catalog")
+	}
+
+	none := svc.BuildSync(t.Context(), beckn.DiscoverRequest{
+		Context: beckn.Context{TransactionID: "t", MessageID: "m"},
+		Message: beckn.DiscoverMessage{Intent: beckn.Intent{TextSearch: "doesnotexist12345"}},
+	})
+	if len(none.Message.Catalogs) != 0 {
+		t.Errorf("expected a non-matching textSearch to return zero catalogs, got %d", len(none.Message.Catalogs))
+	}
+}
+
+// A near-zero matchTimeout demonstrates the wiring end to end (not just
+// the matchCatalogs unit test): DiscoverService actually applies it, not
+// just carries the config value around unused.
+func TestBuildSync_NearZeroMatchTimeoutTruncatesResults(t *testing.T) {
+	svc := NewDiscoverService(newFakeDispatcher(), newTestRunner(t), time.Second, testLogger(), "own-bpp.example.com", "https://own-bpp.example.com", EmbeddedCatalogStore{}, 0)
+
+	got := svc.BuildSync(t.Context(), beckn.DiscoverRequest{
+		Context: beckn.Context{TransactionID: "t", MessageID: "m"},
+		Message: beckn.DiscoverMessage{Intent: beckn.Intent{TextSearch: "coffee"}},
+	})
+	if len(got.Message.Catalogs) != 0 {
+		t.Errorf("expected a near-zero matchTimeout to truncate matching before any catalog is processed, got %d catalogs", len(got.Message.Catalogs))
+	}
+}
+
 func TestProcessAsync_DeliversFixedOnDiscoverPayload(t *testing.T) {
 	dispatcher := newFakeDispatcher()
-	svc := NewDiscoverService(dispatcher, newTestRunner(t), time.Second, testLogger(), "own-bpp.example.com", "https://own-bpp.example.com", EmbeddedCatalogStore{})
+	svc := NewDiscoverService(dispatcher, newTestRunner(t), time.Second, testLogger(), "own-bpp.example.com", "https://own-bpp.example.com", EmbeddedCatalogStore{}, time.Second)
 	req := beckn.DiscoverRequest{Context: beckn.Context{TransactionID: "t1", MessageID: "m1", BapURI: "https://bap.example.com"}}
 
 	svc.ProcessAsync(req)

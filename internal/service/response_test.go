@@ -17,7 +17,7 @@ func TestBuildFixedOnDiscover_EchoesContextWithOnDiscoverAction(t *testing.T) {
 		MessageID:     "msg-1",
 	}
 
-	resp := BuildFixedOnDiscover(reqCtx, "our-own-bpp.example.com", "https://our-own-bpp.example.com")
+	resp := BuildFixedOnDiscover(t.Context(), reqCtx, beckn.Intent{}, "our-own-bpp.example.com", "https://our-own-bpp.example.com")
 
 	if resp.Context.Action != "on_discover" {
 		t.Fatalf("Context.Action = %q, want %q", resp.Context.Action, "on_discover")
@@ -40,7 +40,7 @@ func TestBuildFixedOnDiscover_FillsOwnBppIdentityWhenRequestOmitsIt(t *testing.T
 	// identity onto the on_discover context rather than leaving it blank.
 	reqCtx := beckn.Context{TransactionID: "t", MessageID: "m", BapID: "bap.example.com"}
 
-	resp := BuildFixedOnDiscover(reqCtx, "ds-fabric.ion.id", "https://discover.infra.ion.id")
+	resp := BuildFixedOnDiscover(t.Context(), reqCtx, beckn.Intent{}, "ds-fabric.ion.id", "https://discover.infra.ion.id")
 
 	if resp.Context.BppID != "ds-fabric.ion.id" {
 		t.Errorf("Context.BppID = %q, want the configured own identity ds-fabric.ion.id", resp.Context.BppID)
@@ -56,7 +56,7 @@ func TestBuildFixedOnDiscover_DoesNotOverrideBppIdentityWhenRequestAlreadyHasOne
 	// our identity to overwrite.
 	reqCtx := beckn.Context{TransactionID: "t", MessageID: "m", BppID: "some-other-bpp.example.com", BppURI: "https://some-other-bpp.example.com"}
 
-	resp := BuildFixedOnDiscover(reqCtx, "ds-fabric.ion.id", "https://discover.infra.ion.id")
+	resp := BuildFixedOnDiscover(t.Context(), reqCtx, beckn.Intent{}, "ds-fabric.ion.id", "https://discover.infra.ion.id")
 
 	if resp.Context.BppID != "some-other-bpp.example.com" {
 		t.Errorf("Context.BppID = %q, want the request's own bppId to be preserved", resp.Context.BppID)
@@ -67,7 +67,7 @@ func TestBuildFixedOnDiscover_DoesNotOverrideBppIdentityWhenRequestAlreadyHasOne
 }
 
 func TestBuildFixedOnDiscover_ReturnsAtLeastOneSpecShapedCatalog(t *testing.T) {
-	resp := BuildFixedOnDiscover(beckn.Context{TransactionID: "t", MessageID: "m"}, "own-bpp.example.com", "https://own-bpp.example.com")
+	resp := BuildFixedOnDiscover(t.Context(), beckn.Context{TransactionID: "t", MessageID: "m"}, beckn.Intent{}, "own-bpp.example.com", "https://own-bpp.example.com")
 
 	if len(resp.Message.Catalogs) == 0 {
 		t.Fatal("expected at least one catalog in the fixed response")
@@ -90,7 +90,7 @@ func TestBuildFixedOnDiscover_ReturnsAtLeastOneSpecShapedCatalog(t *testing.T) {
 }
 
 func TestBuildFixedOnDiscover_EveryOfferReferencesAResourceInTheSameCatalog(t *testing.T) {
-	resp := BuildFixedOnDiscover(beckn.Context{TransactionID: "t", MessageID: "m"}, "own-bpp.example.com", "https://own-bpp.example.com")
+	resp := BuildFixedOnDiscover(t.Context(), beckn.Context{TransactionID: "t", MessageID: "m"}, beckn.Intent{}, "own-bpp.example.com", "https://own-bpp.example.com")
 
 	if len(resp.Message.Catalogs) == 0 {
 		t.Fatal("expected at least one catalog")
@@ -125,7 +125,7 @@ func TestBuildFixedOnDiscover_PerCatalogBppIdentityIsPreservedWhenPresentInData(
 	// catalog omits its own bppId/bppUri (should inherit the response
 	// context's identity), another sets its own (a fan-out/federated
 	// result from a different BPP) which must NOT be clobbered.
-	resp := BuildFixedOnDiscover(beckn.Context{TransactionID: "t", MessageID: "m"}, "ds-fabric.ion.id", "https://discover.infra.ion.id")
+	resp := BuildFixedOnDiscover(t.Context(), beckn.Context{TransactionID: "t", MessageID: "m"}, beckn.Intent{}, "ds-fabric.ion.id", "https://discover.infra.ion.id")
 
 	var sawInherited, sawOwnIdentity bool
 	for _, cat := range resp.Message.Catalogs {
@@ -151,8 +151,8 @@ func TestBuildFixedOnDiscover_DoesNotMutateSharedCatalogDataAcrossCalls(t *testi
 	// requests; if it handed out the same underlying Catalog value (or
 	// mutated shared state) instead of a per-call copy, one request's
 	// context could leak into another's response.
-	first := BuildFixedOnDiscover(beckn.Context{TransactionID: "t1", MessageID: "m1"}, "bpp-one.example.com", "https://bpp-one.example.com")
-	second := BuildFixedOnDiscover(beckn.Context{TransactionID: "t2", MessageID: "m2"}, "bpp-two.example.com", "https://bpp-two.example.com")
+	first := BuildFixedOnDiscover(t.Context(), beckn.Context{TransactionID: "t1", MessageID: "m1"}, beckn.Intent{}, "bpp-one.example.com", "https://bpp-one.example.com")
+	second := BuildFixedOnDiscover(t.Context(), beckn.Context{TransactionID: "t2", MessageID: "m2"}, beckn.Intent{}, "bpp-two.example.com", "https://bpp-two.example.com")
 
 	// Compare only catalogs that had no bppId of their own in the source
 	// data (those inherit from the call's own identity and so must differ
@@ -174,7 +174,7 @@ func TestBuildOnDiscover_UsesGivenCatalogsInstedOfTheEmbeddedDemoData(t *testing
 		Resources:  []beckn.Resource{{ID: "ext-res-1", Descriptor: beckn.Descriptor{Name: "External Widget"}}},
 	}}
 
-	resp := BuildOnDiscover(beckn.Context{TransactionID: "t", MessageID: "m"}, "own-bpp.example.com", "https://own-bpp.example.com", external)
+	resp := BuildOnDiscover(t.Context(), beckn.Context{TransactionID: "t", MessageID: "m"}, beckn.Intent{}, "own-bpp.example.com", "https://own-bpp.example.com", external)
 
 	if len(resp.Message.Catalogs) != 1 || resp.Message.Catalogs[0].ID != "external-catalog-1" {
 		t.Fatalf("expected the given external catalogs to be used, got %+v", resp.Message.Catalogs)
@@ -187,7 +187,7 @@ func TestBuildOnDiscover_StampsOwnIdentityOnGivenCatalogsThatOmitOne(t *testing.
 		{ID: "cat-own-identity", BppID: "other-bpp.example.com", BppURI: "https://other-bpp.example.com", Descriptor: beckn.Descriptor{Name: "B"}, Provider: beckn.Provider{ID: "p"}},
 	}
 
-	resp := BuildOnDiscover(beckn.Context{TransactionID: "t", MessageID: "m"}, "own-bpp.example.com", "https://own-bpp.example.com", external)
+	resp := BuildOnDiscover(t.Context(), beckn.Context{TransactionID: "t", MessageID: "m"}, beckn.Intent{}, "own-bpp.example.com", "https://own-bpp.example.com", external)
 
 	byID := map[string]beckn.Catalog{}
 	for _, c := range resp.Message.Catalogs {

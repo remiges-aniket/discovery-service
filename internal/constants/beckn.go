@@ -24,6 +24,13 @@ const (
 const (
 	ErrInvalidJSON          = "SCH_INVALID_JSON"
 	ErrRequiredFieldMissing = "SCH_REQUIRED_FIELD_MISSING"
+	// ErrInvalidIntent covers a malformed message.intent — currently only
+	// filters.type/filters.expression (see service.validateIntent).
+	ErrInvalidIntent = "SCH_INVALID_INTENT"
+	// ErrTooManyRequests backs the 429 NackTooManyRequests response
+	// (beckn.yaml) when a client exceeds its rate limit — see
+	// internal/handlers.RateLimiter, CONTEXT.md D20.
+	ErrTooManyRequests = "TOO_MANY_REQUESTS"
 )
 
 const (

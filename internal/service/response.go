@@ -1,6 +1,7 @@
 package service
 
 import (
+	"context"
 	_ "embed"
 	"encoding/json"
 	"fmt"
@@ -49,17 +50,18 @@ func mustParseFixedCatalogs() []beckn.Catalog {
 // unaffected by CONTEXT.md D17's addition of external catalog sources —
 // see EmbeddedCatalogStore for the CatalogStore-backed equivalent used by
 // DiscoverService today.
-func BuildFixedOnDiscover(reqCtx beckn.Context, ownBppID, ownBppURI string) beckn.OnDiscoverRequest {
-	return BuildOnDiscover(reqCtx, ownBppID, ownBppURI, fixedCatalogs)
+func BuildFixedOnDiscover(ctx context.Context, reqCtx beckn.Context, intent beckn.Intent, ownBppID, ownBppURI string) beckn.OnDiscoverRequest {
+	return BuildOnDiscover(ctx, reqCtx, intent, ownBppID, ownBppURI, fixedCatalogs)
 }
 
 // BuildOnDiscover builds the on_discover payload for reqCtx from the given
 // catalogs — the demo fixed catalog (BuildFixedOnDiscover), or real data
 // polled from configured BPP sources (see internal/catalogsource,
 // CONTEXT.md D17), depending on which CatalogStore DiscoverService was
-// constructed with. It returns the same payload shape regardless of the
-// catalogs' origin; real query matching against them is a later milestone
-// (M3).
+// constructed with. catalogs is narrowed by intent (see matchCatalogs)
+// before the response is built — see CONTEXT.md's intent-matching decision
+// entry for scope (textSearch/filters/spatial; mediaSearch is a documented
+// no-op).
 //
 // ownBppID/ownBppURI are this service's own registered identity (see
 // config.Config.BppID/BppURI, CONTEXT.md D13). A real observed /discover
@@ -78,7 +80,7 @@ func BuildFixedOnDiscover(reqCtx beckn.Context, ownBppID, ownBppURI string) beck
 // Each call returns its own copy of catalogs, so concurrent callers never
 // observe or mutate each other's values (see
 // TestBuildFixedOnDiscover_DoesNotMutateSharedCatalogDataAcrossCalls).
-func BuildOnDiscover(reqCtx beckn.Context, ownBppID, ownBppURI string, catalogs []beckn.Catalog) beckn.OnDiscoverRequest {
+func BuildOnDiscover(ctx context.Context, reqCtx beckn.Context, intent beckn.Intent, ownBppID, ownBppURI string, catalogs []beckn.Catalog) beckn.OnDiscoverRequest {
 	respCtx := reqCtx
 	respCtx.Action = constants.ActionOnDiscover
 	if respCtx.BppID == "" {
@@ -88,8 +90,9 @@ func BuildOnDiscover(reqCtx beckn.Context, ownBppID, ownBppURI string, catalogs 
 		respCtx.BppURI = ownBppURI
 	}
 
-	out := make([]beckn.Catalog, len(catalogs))
-	for i, c := range catalogs {
+	matched := matchCatalogs(ctx, catalogs, intent)
+	out := make([]beckn.Catalog, len(matched))
+	for i, c := range matched {
 		if c.BppID == "" {
 			c.BppID = respCtx.BppID
 		}

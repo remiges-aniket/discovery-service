@@ -67,7 +67,7 @@ func (h *DiscoverHandler) ServeSync(w http.ResponseWriter, r *http.Request) {
 		"bapId":         req.Context.BapID,
 	})
 
-	utility.WriteJSON(w, http.StatusOK, h.svc.BuildSync(req))
+	utility.WriteJSON(w, http.StatusOK, h.svc.BuildSync(r.Context(), req))
 }
 
 // decodeAndValidate reads and decodes the request body (size-bounded per

@@ -10,6 +10,7 @@ package service
 import (
 	"context"
 	"encoding/base64"
+	"fmt"
 	"time"
 
 	"github.com/remiges-tech/logharbour/logharbour"
@@ -69,9 +70,13 @@ type DiscoverService struct {
 	// catalogStore supplies the catalog data served on both the sync and
 	// async /discover paths — see CatalogStore and CONTEXT.md D17.
 	catalogStore CatalogStore
+	// matchTimeout bounds how long a single request's intent matching
+	// (matchCatalogs) may run before it's cut short — see
+	// config.Config.MatchTimeout and CONTEXT.md D20.
+	matchTimeout time.Duration
 }
 
-func NewDiscoverService(dispatcher OnDiscoverDispatcher, runner AsyncRunner, deliveryTimeout time.Duration, logger *logharbour.Logger, ownBppID, ownBppURI string, catalogStore CatalogStore) *DiscoverService {
+func NewDiscoverService(dispatcher OnDiscoverDispatcher, runner AsyncRunner, deliveryTimeout time.Duration, logger *logharbour.Logger, ownBppID, ownBppURI string, catalogStore CatalogStore, matchTimeout time.Duration) *DiscoverService {
 	return &DiscoverService{
 		dispatcher:      dispatcher,
 		runner:          runner,
@@ -80,6 +85,7 @@ func NewDiscoverService(dispatcher OnDiscoverDispatcher, runner AsyncRunner, del
 		ownBppID:        ownBppID,
 		ownBppURI:       ownBppURI,
 		catalogStore:    catalogStore,
+		matchTimeout:    matchTimeout,
 	}
 }
 
@@ -98,7 +104,7 @@ func (s *DiscoverService) Validate(req beckn.DiscoverRequest) (errCode, errMsg s
 	if req.Context.BapURI == "" {
 		return constants.ErrRequiredFieldMissing, "context.bapUri is required"
 	}
-	return "", ""
+	return validateIntent(req.Message.Intent)
 }
 
 // ValidateSync checks the fields required on the synchronous GET /discover
@@ -112,6 +118,27 @@ func (s *DiscoverService) ValidateSync(req beckn.DiscoverRequest) (errCode, errM
 	}
 	if req.Context.MessageID == "" {
 		return constants.ErrRequiredFieldMissing, "context.messageId is required"
+	}
+	return validateIntent(req.Message.Intent)
+}
+
+// validateIntent rejects a message.intent this service cannot safely
+// evaluate — currently only a malformed filters (see internal/service/match.go,
+// CONTEXT.md's intent-matching decision entry). textSearch/spatial are
+// never hard-rejected here: unsupported spatial operators are handled
+// permissively at match time (matchesSpatial), not as a validation error.
+// Called from both Validate and ValidateSync so a bad filters expression is
+// a 400 before the request is ever Acked — the async POST /discover path
+// Acks before any catalog matching runs, so this can't be caught later.
+func validateIntent(intent beckn.Intent) (errCode, errMsg string) {
+	if intent.Filters == nil {
+		return "", ""
+	}
+	if intent.Filters.Type != "jsonpath" {
+		return constants.ErrInvalidIntent, fmt.Sprintf("message.intent.filters.type must be \"jsonpath\", got %q", intent.Filters.Type)
+	}
+	if _, err := parseJSONPathFilter(intent.Filters.Expression); err != nil {
+		return constants.ErrInvalidIntent, fmt.Sprintf("message.intent.filters.expression is not a valid JSONPath expression: %v", err)
 	}
 	return "", ""
 }
@@ -137,10 +164,19 @@ func (s *DiscoverService) ProcessAsync(req beckn.DiscoverRequest) {
 	})
 
 	accepted := s.runner.Run(func(ctx context.Context) {
+		matchCtx, matchCancel := context.WithTimeout(ctx, s.matchTimeout)
+		payload := BuildOnDiscover(matchCtx, req.Context, req.Message.Intent, s.ownBppID, s.ownBppURI, s.catalogStore.Catalogs())
+		if matchCtx.Err() == context.DeadlineExceeded {
+			s.logger.Warn().LogActivity("intent matching timed out, returning partial results", map[string]any{
+				"transactionId": req.Context.TransactionID,
+				"messageId":     req.Context.MessageID,
+			})
+		}
+		matchCancel()
+
 		deliverCtx, cancel := context.WithTimeout(ctx, s.deliveryTimeout)
 		defer cancel()
 
-		payload := BuildOnDiscover(req.Context, s.ownBppID, s.ownBppURI, s.catalogStore.Catalogs())
 		if err := s.dispatcher.Deliver(deliverCtx, req.Context.BapURI, payload); err != nil {
 			s.logger.Err().LogActivity("on_discover delivery failed", map[string]any{
 				"transactionId": req.Context.TransactionID,
@@ -171,12 +207,23 @@ func (s *DiscoverService) ProcessAsync(req beckn.DiscoverRequest) {
 // requires). Unlike ProcessAsync, nothing is dispatched over HTTP here:
 // the caller (internal/handlers) writes the returned payload straight
 // into its own response body.
-func (s *DiscoverService) BuildSync(req beckn.DiscoverRequest) beckn.OnDiscoverRequest {
+func (s *DiscoverService) BuildSync(ctx context.Context, req beckn.DiscoverRequest) beckn.OnDiscoverRequest {
 	s.logger.LogActivity("discover request served synchronously", map[string]any{
 		"transactionId": req.Context.TransactionID,
 		"messageId":     req.Context.MessageID,
 	})
-	return BuildOnDiscover(req.Context, s.ownBppID, s.ownBppURI, s.catalogStore.Catalogs())
+
+	matchCtx, cancel := context.WithTimeout(ctx, s.matchTimeout)
+	defer cancel()
+
+	resp := BuildOnDiscover(matchCtx, req.Context, req.Message.Intent, s.ownBppID, s.ownBppURI, s.catalogStore.Catalogs())
+	if matchCtx.Err() == context.DeadlineExceeded {
+		s.logger.Warn().LogActivity("intent matching timed out, returning partial results", map[string]any{
+			"transactionId": req.Context.TransactionID,
+			"messageId":     req.Context.MessageID,
+		})
+	}
+	return resp
 }
 
 // PlaceholderSignature stands in for a real Ed25519 CounterSignature until
